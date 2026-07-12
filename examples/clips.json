@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "input": "./videos/demo.mp4",
+  "outputDirectory": "./output",
+  "profile": "balanced",
+  "loop": "forever",
+  "continueOnError": true,
+  "clips": [
+    {
+      "name": "opening",
+      "start": "00:01:00",
+      "end": "00:01:05"
+    },
+    {
+      "name": "reaction",
+      "start": "00:03:20",
+      "duration": 7
+    },
+    {
+      "name": "ui-detail",
+      "start": "00:05:10",
+      "duration": "00:00:04",
+      "profile": "high"
+    }
+  ]
+}

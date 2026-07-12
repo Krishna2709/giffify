@@ -1,0 +1,9 @@
+{
+  "name": "video-to-gif",
+  "description": "Generate optimized animated GIFs from explicit video timestamp ranges.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Krishna2709",
+    "url": "https://github.com/Krishna2709"
+  }
+}

@@ -1,0 +1,1065 @@
+"""Command-line interface and orchestration (spec sections 12, 13, 14, 15).
+
+Thin argument parsing plus deterministic, non-interactive orchestration. With
+``--json`` a single final JSON document is written to stdout and progress events
+go to stderr as JSON Lines. Exit codes follow section 14.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import json
+import os
+import signal
+import sys
+import threading
+from collections.abc import Callable
+from dataclasses import dataclass
+from types import FrameType
+from typing import Any, NoReturn
+
+from . import __version__, dependencies, errors, ffmpeg, manifests, models, naming, paths
+from . import config as config_mod
+from .inspect import inspect_source
+from .models import BUILTIN_PROFILES, ClipSpec, EffectiveSettings, SourceInfo
+from .progress import ProgressReporter
+
+SCHEMA_VERSION = 1
+
+# Global cancellation flag, set by SIGINT/SIGTERM handlers (section 16).
+_CANCEL_EVENT = threading.Event()
+
+
+# ---------------------------------------------------------------------------
+# Planning data structures
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PlannedClip:
+    clip: ClipSpec
+    filename: str
+    dest_path: str
+    settings: EffectiveSettings
+    action: str  # 'write' | 'overwrite' | 'skip' | 'collision'
+    collided: bool
+
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+
+class _ArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:  # pragma: no cover - argparse path
+        self.print_usage(sys.stderr)
+        sys.stderr.write(f"{self.prog}: error: {message}\n")
+        raise SystemExit(errors.EXIT_INVALID_USAGE)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = _ArgumentParser(
+        prog="video_to_gif.py",
+        description="Convert explicit timestamp ranges from local videos into optimized GIFs.",
+    )
+    parser.add_argument("--version", action="version", version=f"video-to-gif {__version__}")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    def add_common(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--json", action="store_true", help="Emit a single JSON result on stdout.")
+        p.add_argument("--debug", action="store_true", help="Show diagnostic details on failure.")
+        p.add_argument(
+            "--no-progress", action="store_true", help="Disable JSON Lines progress on stderr."
+        )
+
+    p_doctor = sub.add_parser("doctor", help="Check the environment and dependencies.")
+    p_doctor.add_argument(
+        "--output-directory", help="Optionally check this output directory is writable."
+    )
+    add_common(p_doctor)
+
+    p_inspect = sub.add_parser("inspect", help="Inspect source media with ffprobe.")
+    p_inspect.add_argument("--input", required=True, help="Path to the source video.")
+    add_common(p_inspect)
+
+    p_create = sub.add_parser("create", help="Create one GIF from a timestamp range.")
+    p_create.add_argument("--input", required=True)
+    p_create.add_argument("--start", required=True)
+    p_create.add_argument("--end")
+    p_create.add_argument("--duration")
+    p_create.add_argument("--profile", choices=sorted(models.VALID_PROFILE_NAMES))
+    p_create.add_argument("--output-directory")
+    p_create.add_argument("--output-name", help="Bare output filename (no path separators).")
+    p_create.add_argument("--collision-policy", choices=sorted(models.VALID_COLLISION_POLICIES))
+    p_create.add_argument("--loop", help="forever, once, or an integer >= 1.")
+    p_create.add_argument("--width", type=int)
+    p_create.add_argument("--fps", type=int)
+    p_create.add_argument("--colors", type=int)
+    p_create.add_argument("--allow-upscale", action="store_true")
+    p_create.add_argument("--allow-outside-project", action="store_true")
+    p_create.add_argument(
+        "--invalid-timestamp-policy",
+        choices=sorted(models.VALID_INVALID_TIMESTAMP_POLICIES),
+        default="fail",
+    )
+    p_create.add_argument("--config", help="Explicit config file path.")
+    add_common(p_create)
+
+    p_batch = sub.add_parser("batch", help="Create multiple GIFs from a manifest.")
+    p_batch.add_argument("--manifest", required=True)
+    p_batch.add_argument("--input", help="Override the manifest source path.")
+    p_batch.add_argument("--profile", choices=sorted(models.VALID_PROFILE_NAMES))
+    p_batch.add_argument("--output-directory")
+    p_batch.add_argument("--collision-policy", choices=sorted(models.VALID_COLLISION_POLICIES))
+    p_batch.add_argument("--allow-outside-project", action="store_true")
+    p_batch.add_argument("--dry-run", action="store_true", help="Preflight only; do not encode.")
+    p_batch.add_argument(
+        "--invalid-timestamp-policy",
+        choices=sorted(models.VALID_INVALID_TIMESTAMP_POLICIES),
+        default="fail",
+    )
+    p_batch.add_argument("--config", help="Explicit config file path.")
+    add_common(p_batch)
+
+    p_vc = sub.add_parser("validate-config", help="Validate a configuration file.")
+    p_vc.add_argument("--config", required=True)
+    add_common(p_vc)
+
+    p_vm = sub.add_parser("validate-manifest", help="Validate a manifest file.")
+    p_vm.add_argument("--manifest", required=True)
+    add_common(p_vm)
+
+    return parser
+
+
+# ---------------------------------------------------------------------------
+# Output helpers
+# ---------------------------------------------------------------------------
+
+
+def _emit(result: dict[str, Any], json_mode: bool) -> None:
+    if json_mode:
+        sys.stdout.write(json.dumps(result, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+    else:
+        _emit_human(result)
+
+
+def _emit_human(result: dict[str, Any]) -> None:
+    command = result.get("command")
+    status = result.get("status")
+    if command == "doctor":
+        health = "healthy" if result.get("healthy") else "problems detected"
+        print(f"doctor: {health}")
+        for c in result.get("checks", []):
+            mark = "ok" if c["ok"] else "FAIL"
+            print(f"  [{mark}] {c['name']}: {c['detail']}")
+        return
+    if result.get("error"):
+        err = result["error"]
+        sys.stderr.write(f"{status}: {err.get('code')}: {err.get('message')}\n")
+        if err.get("remediation"):
+            sys.stderr.write(f"  hint: {err['remediation']}\n")
+        return
+    summary = result.get("summary", {})
+    if command in ("create", "batch"):
+        out = result.get("outputDirectory", "./output")
+        created = summary.get("created", 0)
+        failed = summary.get("failed", 0)
+        skipped = summary.get("skipped", 0)
+        if status == "dry_run":
+            print(
+                f"dry run: {summary.get('planned', 0)} clip(s) planned, "
+                f"{summary.get('collisions', 0)} collision(s)."
+            )
+        else:
+            msg = f"Created {created} GIF(s) in {out}"
+            extra = []
+            if failed:
+                extra.append(f"{failed} failed")
+            if skipped:
+                extra.append(f"{skipped} skipped")
+            if extra:
+                msg += "; " + ", ".join(extra)
+            print(msg + ".")
+        return
+    print(json.dumps(result, indent=2))
+
+
+def _error_result(command: str, exc: errors.EngineError, warnings: list[str]) -> dict[str, Any]:
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "command": command,
+        "status": exc.status,
+        "error": exc.to_dict(),
+        "warnings": warnings or [],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Settings resolution (precedence: CLI > manifest > config > default)
+# ---------------------------------------------------------------------------
+
+
+def _first(*values: Any) -> Any:
+    for v in values:
+        if v is not None:
+            return v
+    return None
+
+
+def _make_settings_resolver(
+    source: SourceInfo,
+    *,
+    top_profile: str,
+    top_width: int | None,
+    top_fps: int | None,
+    top_colors: int | None,
+    top_loop: models.LoopValue,
+    allow_upscale: bool,
+) -> Callable[[ClipSpec], EffectiveSettings]:
+    def resolve(clip: ClipSpec) -> EffectiveSettings:
+        profile_name = clip.profile or top_profile
+        builtin = BUILTIN_PROFILES.get(profile_name)
+        base_w = builtin.max_width if builtin else None
+        base_fps = builtin.fps if builtin else None
+        base_colors = builtin.max_colors if builtin else None
+        max_width = _first(clip.width, top_width, base_w)
+        target_fps = _first(clip.fps, top_fps, base_fps)
+        colors = _first(clip.colors, top_colors, base_colors)
+        loop = _first(clip.loop, top_loop) or "forever"
+        return ffmpeg.resolve_effective_settings(
+            source,
+            max_width=max_width,
+            target_fps=target_fps,
+            colors=colors,
+            loop=loop,
+            allow_upscale=allow_upscale,
+            profile_name=profile_name,
+        )
+
+    return resolve
+
+
+# ---------------------------------------------------------------------------
+# Clip validation (FR-006, FR-007)
+# ---------------------------------------------------------------------------
+
+
+def validate_and_filter(
+    clips: list[ClipSpec],
+    duration_ms: int,
+    policy: str,
+) -> tuple[list[ClipSpec], list[dict[str, Any]]]:
+    """Apply timestamp validation and the invalid-timestamp policy.
+
+    Returns (surviving clips, skipped records). Raises on ``fail`` policy.
+    """
+    valid: list[ClipSpec] = []
+    skipped: list[dict[str, Any]] = []
+
+    for clip in clips:
+        non_clampable: str | None = None
+        clampable = False
+        if clip.start_ms < 0:
+            non_clampable = "start is negative"
+        elif clip.start_ms >= duration_ms:
+            non_clampable = (
+                f"start ({clip.start_ms} ms) is at or beyond source duration ({duration_ms} ms)"
+            )
+        elif clip.end_ms <= clip.start_ms:
+            non_clampable = f"end ({clip.end_ms} ms) is not after start ({clip.start_ms} ms)"
+        elif clip.end_ms > duration_ms:
+            clampable = True
+
+        if non_clampable is None and not clampable:
+            valid.append(clip)
+            continue
+
+        # There is a problem with this clip.
+        reason = non_clampable or (
+            f"end ({clip.end_ms} ms) is beyond source duration ({duration_ms} ms)"
+        )
+        if policy == "clamp" and clampable and non_clampable is None:
+            clamped = ClipSpec(
+                index=clip.index,
+                start_ms=clip.start_ms,
+                end_ms=duration_ms,
+                name=clip.name,
+                profile=clip.profile,
+                width=clip.width,
+                fps=clip.fps,
+                colors=clip.colors,
+                loop=clip.loop,
+            )
+            valid.append(clamped)
+            continue
+        if policy == "skip":
+            skipped.append({"clipIndex": clip.index, "reason": reason, "stage": "validate"})
+            continue
+        # fail (default) or clamp on a non-clampable error.
+        raise errors.EngineError(
+            errors.INVALID_TIMESTAMP,
+            f"Clip {clip.index} has an invalid timestamp range: {reason}.",
+            exit_code=errors.EXIT_INVALID_TIMESTAMP,
+            status=errors.STATUS_VALIDATION_FAILED,
+            stage="validate",
+            clip_index=clip.index,
+            remediation="Use --invalid-timestamp-policy skip or clamp, or correct the range.",
+        )
+
+    return valid, skipped
+
+
+# ---------------------------------------------------------------------------
+# Output planning (FR-011, FR-012, section 15.1)
+# ---------------------------------------------------------------------------
+
+
+def plan_outputs(
+    clips: list[ClipSpec],
+    source: SourceInfo,
+    *,
+    output_dir: str,
+    collision_policy: str,
+    resolve_settings: Callable[[ClipSpec], EffectiveSettings],
+) -> list[PlannedClip]:
+    source_stem = os.path.splitext(os.path.basename(source.path))[0]
+    planned: list[PlannedClip] = []
+    reserved: set = set()
+
+    def exists(fn: str) -> bool:
+        return fn.lower() in reserved or os.path.exists(os.path.join(output_dir, fn))
+
+    for clip in clips:
+        settings = resolve_settings(clip)
+        if clip.name:
+            base_fn = naming.sanitize_output_name(clip.name)
+        else:
+            base_fn = naming.default_output_name(source_stem, clip.start_ms, clip.end_ms)
+
+        collided = exists(base_fn)
+        action = "write"
+        final_fn = base_fn
+        if collided:
+            if collision_policy in ("fail", "ask"):
+                action = "collision"
+            elif collision_policy == "overwrite":
+                action = "overwrite"
+            elif collision_policy == "skip":
+                action = "skip"
+            elif collision_policy == "unique":
+                final_fn = naming.unique_name(base_fn, exists)
+                action = "write"
+
+        dest = paths.resolve_within_directory(output_dir, final_fn)
+        if action not in ("skip", "collision"):
+            reserved.add(final_fn.lower())
+        planned.append(PlannedClip(clip, final_fn, dest, settings, action, collided))
+
+    return planned
+
+
+# ---------------------------------------------------------------------------
+# Command handlers
+# ---------------------------------------------------------------------------
+
+
+def _cmd_doctor(args: argparse.Namespace) -> int:
+    report = dependencies.run_doctor(getattr(args, "output_directory", None))
+    result = {
+        "schemaVersion": SCHEMA_VERSION,
+        "command": "doctor",
+        "status": errors.STATUS_SUCCESS if report["healthy"] else errors.STATUS_DEPENDENCY_MISSING,
+        "healthy": report["healthy"],
+        "checks": report["checks"],
+        "ffmpeg": report["ffmpeg"],
+        "ffprobe": report["ffprobe"],
+        "installGuidance": report["installGuidance"],
+        "warnings": [],
+    }
+    _emit(result, args.json)
+    return errors.EXIT_SUCCESS if report["healthy"] else errors.EXIT_DEPENDENCY_MISSING
+
+
+def _cmd_inspect(args: argparse.Namespace) -> int:
+    project_root = paths.resolve_project_root(os.getcwd())
+    tools = dependencies.require_ffmpeg_tools()
+    source_path = paths.resolve_source_path(args.input, project_root=project_root)
+    paths.ensure_source_readable(source_path)
+    source = inspect_source(tools["ffprobe"], source_path)
+    result = {
+        "schemaVersion": SCHEMA_VERSION,
+        "command": "inspect",
+        "status": errors.STATUS_SUCCESS,
+        "source": source.to_public(),
+        "warnings": source.warnings,
+    }
+    _emit(result, args.json)
+    return errors.EXIT_SUCCESS
+
+
+def _resolve_source_for_job(
+    args: argparse.Namespace,
+    project_root: str,
+    manifest_input: str | None,
+) -> str:
+    raw = _first(getattr(args, "input", None), manifest_input)
+    if not raw:
+        raise errors.EngineError(
+            errors.INPUT_NOT_FOUND,
+            "No source specified. Provide --input or set 'input' in the manifest.",
+            exit_code=errors.EXIT_INPUT_NOT_FOUND,
+            status=errors.STATUS_FAILED,
+            stage="input",
+        )
+    source_path = paths.resolve_source_path(raw, project_root=project_root)
+    paths.ensure_source_readable(source_path)
+    return source_path
+
+
+def _clip_result(planned: PlannedClip, conv: ffmpeg.ConversionResult) -> dict[str, Any]:
+    clip = planned.clip
+    return {
+        "clipIndex": clip.index,
+        "name": clip.name,
+        "path": _display_path(conv.path),
+        "startMs": clip.start_ms,
+        "endMs": clip.end_ms,
+        "durationMs": clip.duration_ms,
+        "width": conv.width,
+        "height": conv.height,
+        "fps": conv.fps,
+        "sizeBytes": conv.size_bytes,
+    }
+
+
+def _display_path(path: str) -> str:
+    try:
+        rel = os.path.relpath(path, os.getcwd())
+        if not rel.startswith(".."):
+            return "./" + rel if not rel.startswith("./") else rel
+    except ValueError:
+        pass
+    return path
+
+
+def _run_conversions(
+    planned: list[PlannedClip],
+    source: SourceInfo,
+    cfg: config_mod.Config,
+    tools: dict[str, str],
+    reporter: ProgressReporter,
+    *,
+    continue_on_error: bool,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    created: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    total = len(planned)
+
+    for i, planned_clip in enumerate(planned):
+        clip = planned_clip.clip
+        if planned_clip.action == "skip":
+            skipped.append({"clipIndex": clip.index, "reason": "output exists (skip policy)"})
+            reporter.clip_skipped(clip.index, "collision-skip")
+            continue
+        if _CANCEL_EVENT.is_set():
+            raise errors.CancelledError(clip_index=clip.index)
+
+        reporter.clip_started(clip.index, total, clip.name)
+        try:
+            conv = ffmpeg.convert_clip(
+                tools["ffmpeg"],
+                source,
+                start_ms=clip.start_ms,
+                duration_ms=clip.duration_ms,
+                settings=planned_clip.settings,
+                dest_path=planned_clip.dest_path,
+                output_dir=os.path.dirname(planned_clip.dest_path),
+                timeout_seconds=cfg.max_clip_processing_seconds,
+                max_temp_bytes=cfg.max_temporary_bytes,
+                keep_temporary_files=cfg.keep_temporary_files,
+                clip_index=clip.index,
+                cancel_event=_CANCEL_EVENT,
+                reporter=reporter,
+            )
+        except errors.CancelledError:
+            raise
+        except errors.EngineError as exc:
+            failed.append(exc.to_dict())
+            reporter.clip_failed(clip.index, exc.code, exc.message)
+            if not continue_on_error:
+                # Stop-on-error: leave the remaining clips unprocessed, but still
+                # report them as skipped so the structured result stays complete.
+                # A stop-on-error run with prior successes is a partial batch
+                # success (exit 11); with none it is a failure whose code (e.g.
+                # RESOURCE_LIMIT_EXCEEDED per SEC-011) is preserved. The section 14
+                # / SEC-011 exit-code precedence is applied by _job_exit_code.
+                for remaining in planned[i + 1 :]:
+                    r_clip = remaining.clip
+                    reason = (
+                        "output exists (skip policy)"
+                        if remaining.action == "skip"
+                        else "not processed (stopped after an earlier failure)"
+                    )
+                    skipped.append({"clipIndex": r_clip.index, "reason": reason})
+                    reporter.clip_skipped(r_clip.index, "stopped-on-error")
+                break
+        else:
+            created.append(_clip_result(planned_clip, conv))
+            reporter.clip_completed(clip.index, _display_path(conv.path))
+
+    return created, failed, skipped
+
+
+def _finalize_status(created: list, failed: list, requested: int) -> str:
+    if failed and created:
+        return errors.STATUS_PARTIAL
+    if failed and not created:
+        return errors.STATUS_FAILED
+    return errors.STATUS_SUCCESS
+
+
+def _collision_result(
+    command: str, planned: list[PlannedClip], output_dir: str, warnings: list[str]
+) -> dict[str, Any]:
+    collisions = [
+        {
+            "clipIndex": p.clip.index,
+            "name": p.clip.name,
+            "path": _display_path(p.dest_path),
+        }
+        for p in planned
+        if p.action == "collision"
+    ]
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "command": command,
+        "status": errors.STATUS_COLLISION,
+        "outputDirectory": _display_path(output_dir),
+        "collisions": collisions,
+        "warnings": warnings,
+        "summary": {"requested": len(planned), "collisions": len(collisions)},
+    }
+
+
+def _dry_run_result(
+    command: str,
+    source: SourceInfo,
+    planned: list[PlannedClip],
+    output_dir: str,
+    skipped: list,
+    warnings: list[str],
+) -> dict[str, Any]:
+    plan_entries = []
+    collisions = 0
+    for p in planned:
+        duration_s = p.clip.duration_ms / 1000.0
+        est_frames = round(duration_s * p.settings.fps)
+        if p.action == "collision":
+            collisions += 1
+        plan_entries.append(
+            {
+                "clipIndex": p.clip.index,
+                "name": p.clip.name,
+                "path": _display_path(p.dest_path),
+                "startMs": p.clip.start_ms,
+                "endMs": p.clip.end_ms,
+                "durationMs": p.clip.duration_ms,
+                "width": p.settings.width,
+                "height": p.settings.height,
+                "fps": p.settings.fps,
+                "colors": p.settings.colors,
+                "action": p.action,
+                "collision": p.collided,
+                "estimatedFrames": est_frames,
+                "estimatedWorkUnits": est_frames,
+            }
+        )
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "command": command,
+        "status": errors.STATUS_DRY_RUN,
+        "source": source.to_public(),
+        "outputDirectory": _display_path(output_dir),
+        "plan": plan_entries,
+        "skipped": skipped,
+        "warnings": warnings,
+        "summary": {
+            "requested": len(planned) + len(skipped),
+            "planned": len([p for p in planned if p.action != "collision"]),
+            "collisions": collisions,
+            "skipped": len(skipped),
+        },
+    }
+
+
+def _prepare_job(args: argparse.Namespace, command: str) -> dict[str, Any]:
+    """Shared preflight for create/batch. Returns a context dict."""
+    project_root = paths.resolve_project_root(os.getcwd())
+    cfg = config_mod.resolve_config(
+        explicit_path=getattr(args, "config", None), project_root=project_root
+    )
+    warnings: list[str] = list(cfg.warnings)
+
+    # Manifest (batch) vs single clip (create).
+    manifest: manifests.Manifest | None = None
+    if command == "batch":
+        manifest = manifests.load_manifest_file(args.manifest)
+        warnings.extend(manifest.warnings)
+
+    tools = dependencies.require_ffmpeg_tools()
+
+    manifest_input = manifest.input if manifest else None
+    source_path = _resolve_source_for_job(args, project_root, manifest_input)
+    source = inspect_source(tools["ffprobe"], source_path)
+    warnings.extend(source.warnings)
+
+    # Resolve top-level settings via precedence.
+    allow_outside = bool(getattr(args, "allow_outside_project", False)) or cfg.allow_outside_project
+    top_profile = (
+        _first(
+            getattr(args, "profile", None),
+            manifest.profile if manifest else None,
+            cfg.default_profile,
+        )
+        or "balanced"
+    )
+    output_dir_raw = _first(
+        getattr(args, "output_directory", None),
+        manifest.output_directory if manifest else None,
+        cfg.output_directory,
+    )
+    output_dir = paths.resolve_output_directory(
+        output_dir_raw, project_root=project_root, allow_outside_project=allow_outside
+    )
+
+    collision_policy = (
+        _first(
+            getattr(args, "collision_policy", None),
+            manifest.collision_policy if manifest else None,
+            cfg.collision_policy,
+        )
+        or "fail"
+    )
+    top_loop = (
+        _first(getattr(args, "loop", None), manifest.loop if manifest else None, cfg.loop)
+        or "forever"
+    )
+    if isinstance(top_loop, str) and top_loop not in ("forever",):
+        top_loop = models.parse_loop(top_loop)
+    continue_on_error = _first(
+        manifest.continue_on_error if manifest else None, cfg.continue_on_error
+    )
+    if continue_on_error is None:
+        continue_on_error = True
+
+    top_width = _first(getattr(args, "width", None), manifest.width if manifest else None)
+    top_fps = _first(getattr(args, "fps", None), manifest.fps if manifest else None)
+    top_colors = _first(getattr(args, "colors", None), manifest.colors if manifest else None)
+    allow_upscale = bool(getattr(args, "allow_upscale", False)) or (
+        manifest.allow_upscale if manifest and manifest.allow_upscale else False
+    )
+
+    return {
+        "project_root": project_root,
+        "cfg": cfg,
+        "warnings": warnings,
+        "manifest": manifest,
+        "tools": tools,
+        "source": source,
+        "output_dir": output_dir,
+        "collision_policy": collision_policy,
+        "continue_on_error": continue_on_error,
+        "resolver": _make_settings_resolver(
+            source,
+            top_profile=top_profile,
+            top_width=top_width,
+            top_fps=top_fps,
+            top_colors=top_colors,
+            top_loop=top_loop,
+            allow_upscale=allow_upscale,
+        ),
+    }
+
+
+def _build_create_clip(args: argparse.Namespace) -> ClipSpec:
+    from .timestamps import parse_duration, parse_timestamp
+
+    has_end = args.end is not None
+    has_dur = args.duration is not None
+    if not has_end and not has_dur:
+        raise errors.EngineError(
+            errors.INVALID_CLIP,
+            "create requires exactly one of --end or --duration.",
+            exit_code=errors.EXIT_INVALID_TIMESTAMP,
+            status=errors.STATUS_VALIDATION_FAILED,
+            stage="validate",
+            remediation="Provide --end or --duration.",
+        )
+    start_ms = parse_timestamp(args.start, field_path="start")
+    end_ms = None
+    if has_end:
+        end_ms = parse_timestamp(args.end, field_path="end")
+    dur_end = None
+    if has_dur:
+        dur_end = start_ms + parse_duration(args.duration, field_path="duration")
+    if has_end and has_dur and end_ms != dur_end:
+        raise errors.EngineError(
+            errors.INVALID_CLIP,
+            "--end and --duration must resolve to the same end timestamp.",
+            exit_code=errors.EXIT_INVALID_TIMESTAMP,
+            status=errors.STATUS_VALIDATION_FAILED,
+            stage="validate",
+        )
+    resolved_end = end_ms if has_end else dur_end
+    # Exactly one of --end/--duration was provided (checked above), so end is set.
+    assert resolved_end is not None
+    loop = models.parse_loop(args.loop) if getattr(args, "loop", None) else None
+    name = args.output_name if getattr(args, "output_name", None) else None
+    return ClipSpec(
+        index=0,
+        start_ms=start_ms,
+        end_ms=resolved_end,
+        name=name,
+        profile=args.profile,
+        width=args.width,
+        fps=args.fps,
+        colors=args.colors,
+        loop=loop,
+    )
+
+
+def _cmd_create(args: argparse.Namespace) -> int:
+    ctx = _prepare_job(args, "create")
+    source: SourceInfo = ctx["source"]
+    clip = _build_create_clip(args)
+
+    valid, skipped_invalid = validate_and_filter(
+        [clip], source.duration_ms, args.invalid_timestamp_policy
+    )
+    if not valid:
+        # Single clip skipped as invalid.
+        result = _empty_job_result(
+            "create", source, ctx["output_dir"], skipped_invalid, ctx["warnings"]
+        )
+        _emit(result, args.json)
+        return errors.EXIT_SUCCESS
+
+    planned = plan_outputs(
+        valid,
+        source,
+        output_dir=ctx["output_dir"],
+        collision_policy=ctx["collision_policy"],
+        resolve_settings=ctx["resolver"],
+    )
+    if any(p.action == "collision" for p in planned):
+        result = _collision_result("create", planned, ctx["output_dir"], ctx["warnings"])
+        _emit(result, args.json)
+        return errors.EXIT_COLLISION
+
+    paths.ensure_directory(ctx["output_dir"])
+    reporter = ProgressReporter(enabled=not args.no_progress)
+    created, failed, skipped = _run_conversions(
+        planned,
+        source,
+        ctx["cfg"],
+        ctx["tools"],
+        reporter,
+        continue_on_error=ctx["continue_on_error"],
+    )
+    skipped = skipped_invalid + skipped
+
+    status = _finalize_status(created, failed, 1)
+    result = _job_result(
+        "create", source, ctx["output_dir"], created, failed, skipped, ctx["warnings"], 1
+    )
+    result["status"] = status
+    _emit(result, args.json)
+    return _job_exit_code(status, created, failed)
+
+
+def _cmd_batch(args: argparse.Namespace) -> int:
+    ctx = _prepare_job(args, "batch")
+    source: SourceInfo = ctx["source"]
+    manifest: manifests.Manifest = ctx["manifest"]
+
+    valid, skipped_invalid = validate_and_filter(
+        manifest.clips, source.duration_ms, args.invalid_timestamp_policy
+    )
+    planned = plan_outputs(
+        valid,
+        source,
+        output_dir=ctx["output_dir"],
+        collision_policy=ctx["collision_policy"],
+        resolve_settings=ctx["resolver"],
+    )
+
+    if args.dry_run:
+        result = _dry_run_result(
+            "batch", source, planned, ctx["output_dir"], skipped_invalid, ctx["warnings"]
+        )
+        _emit(result, args.json)
+        return errors.EXIT_SUCCESS
+
+    if any(p.action == "collision" for p in planned):
+        result = _collision_result("batch", planned, ctx["output_dir"], ctx["warnings"])
+        _emit(result, args.json)
+        return errors.EXIT_COLLISION
+
+    paths.ensure_directory(ctx["output_dir"])
+    reporter = ProgressReporter(enabled=not args.no_progress)
+    created, failed, skipped = _run_conversions(
+        planned,
+        source,
+        ctx["cfg"],
+        ctx["tools"],
+        reporter,
+        continue_on_error=ctx["continue_on_error"],
+    )
+    skipped = skipped_invalid + skipped
+
+    requested = len(manifest.clips)
+    status = _finalize_status(created, failed, requested)
+    result = _job_result(
+        "batch", source, ctx["output_dir"], created, failed, skipped, ctx["warnings"], requested
+    )
+    result["status"] = status
+    _emit(result, args.json)
+    return _job_exit_code(status, created, failed)
+
+
+def _empty_job_result(
+    command: str,
+    source: SourceInfo,
+    output_dir: str,
+    skipped: list[dict[str, Any]],
+    warnings: list[str],
+) -> dict[str, Any]:
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "command": command,
+        "status": errors.STATUS_SUCCESS,
+        "source": source.to_public(),
+        "outputDirectory": _display_path(output_dir),
+        "created": [],
+        "failed": [],
+        "skipped": skipped,
+        "warnings": warnings,
+        "summary": {"requested": len(skipped), "created": 0, "failed": 0, "skipped": len(skipped)},
+    }
+
+
+def _representative_error(failed: list[dict[str, Any]]) -> dict[str, Any]:
+    """Pick the failure that surfaces as the top-level error of a wholly failed
+    job. SEC-011 precedence: a resource-limit breach wins; otherwise the first
+    failure is used. Entries are already ``EngineError.to_dict()`` shaped.
+    """
+    for entry in failed:
+        if entry.get("code") == errors.RESOURCE_LIMIT_EXCEEDED:
+            return entry
+    return failed[0]
+
+
+def _job_result(
+    command: str,
+    source: SourceInfo,
+    output_dir: str,
+    created: list[dict[str, Any]],
+    failed: list[dict[str, Any]],
+    skipped: list[dict[str, Any]],
+    warnings: list[str],
+    requested: int,
+) -> dict[str, Any]:
+    result = {
+        "schemaVersion": SCHEMA_VERSION,
+        "command": command,
+        "status": errors.STATUS_SUCCESS,
+        "source": source.to_public(),
+        "outputDirectory": _display_path(output_dir),
+        "created": created,
+        "failed": failed,
+        "skipped": skipped,
+        "warnings": warnings,
+        "summary": {
+            "requested": requested,
+            "created": len(created),
+            "failed": len(failed),
+            "skipped": len(skipped),
+        },
+    }
+    # A wholly failed job (nothing created) also surfaces a top-level structured
+    # error mirroring the standalone error result, so callers reading `error`
+    # still see the stable code. Partial successes keep per-clip codes only, so
+    # the created work is never masked by a top-level error (section 13 / 14).
+    if failed and not created:
+        result["error"] = _representative_error(failed)
+    return result
+
+
+# Natural process exit code for each stable error code (spec section 14). Used
+# to map a wholly-failed job's error code(s) to the correct exit status instead
+# of hard-flattening every failure to an FFmpeg failure.
+_CODE_EXIT: dict[str, int] = {
+    errors.RESOURCE_LIMIT_EXCEEDED: errors.EXIT_RESOURCE_LIMIT,
+    errors.FFMPEG_FAILED: errors.EXIT_FFMPEG_FAILED,
+    errors.DEPENDENCY_MISSING: errors.EXIT_DEPENDENCY_MISSING,
+    errors.INPUT_NOT_FOUND: errors.EXIT_INPUT_NOT_FOUND,
+    errors.INPUT_NOT_READABLE: errors.EXIT_INPUT_NOT_FOUND,
+    errors.PERMISSION_DENIED: errors.EXIT_PERMISSION,
+}
+
+
+def _job_exit_code(status: str, created: list, failed: list) -> int:
+    if status == errors.STATUS_SUCCESS:
+        return errors.EXIT_SUCCESS
+    if status == errors.STATUS_PARTIAL:
+        # Some clips succeeded: partial batch success. Per-clip error codes are
+        # preserved in the structured result (SEC-011 precedence).
+        return errors.EXIT_PARTIAL
+    # failed: no clips succeeded.
+    if failed:
+        codes = {f.get("code") for f in failed}
+        # SEC-011: a resource-limit breach with no successful clips -> exit 13,
+        # taking precedence over any other failure code in the job.
+        if errors.RESOURCE_LIMIT_EXCEEDED in codes:
+            return errors.EXIT_RESOURCE_LIMIT
+        # When every failure shares one error code, map it to its natural exit;
+        # otherwise fall back to a generic FFmpeg failure.
+        if len(codes) == 1:
+            return _CODE_EXIT.get(next(iter(codes)), errors.EXIT_FFMPEG_FAILED)
+        return errors.EXIT_FFMPEG_FAILED
+    return errors.EXIT_INTERNAL
+
+
+def _cmd_validate_config(args: argparse.Namespace) -> int:
+    cfg = config_mod.load_config_file(args.config)
+    result = {
+        "schemaVersion": SCHEMA_VERSION,
+        "command": "validate-config",
+        "status": errors.STATUS_SUCCESS,
+        "valid": True,
+        "warnings": cfg.warnings,
+        "resolved": {
+            "defaultProfile": cfg.default_profile,
+            "outputDirectory": cfg.output_directory,
+            "loop": cfg.loop,
+            "collisionPolicy": cfg.collision_policy,
+            "continueOnError": cfg.continue_on_error,
+            "keepTemporaryFiles": cfg.keep_temporary_files,
+            "allowOutsideProject": cfg.allow_outside_project,
+            "limits": {
+                "maxClipProcessingSeconds": cfg.max_clip_processing_seconds,
+                "maxTemporaryBytes": cfg.max_temporary_bytes,
+            },
+        },
+    }
+    _emit(result, args.json)
+    return errors.EXIT_SUCCESS
+
+
+def _cmd_validate_manifest(args: argparse.Namespace) -> int:
+    manifest = manifests.load_manifest_file(args.manifest)
+    result = {
+        "schemaVersion": SCHEMA_VERSION,
+        "command": "validate-manifest",
+        "status": errors.STATUS_SUCCESS,
+        "valid": True,
+        "input": manifest.input,
+        "clipCount": len(manifest.clips),
+        "clips": [
+            {
+                "clipIndex": c.index,
+                "name": c.name,
+                "startMs": c.start_ms,
+                "endMs": c.end_ms,
+                "durationMs": c.duration_ms,
+            }
+            for c in manifest.clips
+        ],
+        "warnings": manifest.warnings,
+    }
+    _emit(result, args.json)
+    return errors.EXIT_SUCCESS
+
+
+_HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
+    "doctor": _cmd_doctor,
+    "inspect": _cmd_inspect,
+    "create": _cmd_create,
+    "batch": _cmd_batch,
+    "validate-config": _cmd_validate_config,
+    "validate-manifest": _cmd_validate_manifest,
+}
+
+
+def _install_signal_handlers() -> None:
+    def handler(signum: int, frame: FrameType | None) -> None:
+        _CANCEL_EVENT.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        # Not on the main thread (e.g. under a test runner) -> cannot install.
+        with contextlib.suppress(ValueError, OSError):  # pragma: no cover
+            signal.signal(sig, handler)
+
+
+def _cancelled_result(
+    command: str, exc: errors.CancelledError, warnings: list[str], created: list | None = None
+) -> dict[str, Any]:
+    result = {
+        "schemaVersion": SCHEMA_VERSION,
+        "command": command,
+        "status": errors.STATUS_CANCELLED,
+        "error": exc.to_dict(),
+        "warnings": warnings or [],
+        "summary": {"created": len(created or [])},
+    }
+    return result
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    _install_signal_handlers()
+    _CANCEL_EVENT.clear()
+
+    handler = _HANDLERS.get(args.command)
+    if handler is None:  # pragma: no cover - argparse guards this
+        parser.error(f"Unknown command: {args.command}")
+        return errors.EXIT_INVALID_USAGE
+
+    json_mode = getattr(args, "json", False)
+    debug = getattr(args, "debug", False)
+    try:
+        return handler(args)
+    except errors.CancelledError as exc:
+        result = _cancelled_result(args.command, exc, [])
+        _emit(result, json_mode)
+        return errors.EXIT_CANCELLED
+    except errors.EngineError as exc:
+        result = _error_result(args.command, exc, [])
+        _emit(result, json_mode)
+        if debug:
+            import traceback
+
+            traceback.print_exc()
+        return exc.exit_code
+    except KeyboardInterrupt:  # pragma: no cover
+        cancelled = errors.CancelledError()
+        _emit(_cancelled_result(args.command, cancelled, []), json_mode)
+        return errors.EXIT_CANCELLED
+    except Exception as exc:
+        engine_exc = errors.EngineError(
+            errors.INTERNAL_ERROR,
+            f"Internal engine error: {exc}",
+            exit_code=errors.EXIT_INTERNAL,
+            status=errors.STATUS_FAILED,
+        )
+        _emit(_error_result(args.command, engine_exc, []), json_mode)
+        if debug:
+            import traceback
+
+            traceback.print_exc()
+        return errors.EXIT_INTERNAL

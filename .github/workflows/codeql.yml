@@ -1,0 +1,37 @@
+name: CodeQL
+
+# Static analysis for the Python engine (stdlib-only) and tooling. The tree is
+# small, so nothing is excluded from analysis.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, Mondays 07:00 UTC, to catch newly disclosed query patterns.
+    - cron: "0 7 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (python)
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write # upload CodeQL results to the Security tab
+      contents: read
+
+    steps:
+      # Supply-chain hygiene: official actions only, pinned to full commit SHAs.
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
+        with:
+          languages: python
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0

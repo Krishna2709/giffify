@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "defaultProfile": "balanced",
+  "outputDirectory": "./output",
+  "loop": "forever",
+  "collisionPolicy": "ask",
+  "continueOnError": true,
+  "keepTemporaryFiles": false,
+  "allowOutsideProject": false,
+  "remoteSources": "disabled",
+  "limits": {
+    "maxClipProcessingSeconds": 600,
+    "maxTemporaryBytes": 2147483648
+  }
+}

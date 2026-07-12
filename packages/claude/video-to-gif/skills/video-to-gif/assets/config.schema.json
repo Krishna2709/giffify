@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://video-to-gif.dev/schemas/config.schema.json",
+  "title": "video-to-gif project configuration",
+  "description": "Schema for .video-to-gif.json (spec section 9). Unknown fields are warned about rather than rejected, so additionalProperties is intentionally left permissive; the engine emits a warning for any field not defined here. Configuration MUST NOT contain credentials, tokens, signed URLs, passwords, private keys, shell commands, or executable hooks (spec section 9.4).",
+  "type": "object",
+  "required": ["schemaVersion"],
+  "properties": {
+    "schemaVersion": {
+      "description": "Configuration schema version. Must be 1 for this release.",
+      "const": 1
+    },
+    "defaultProfile": {
+      "description": "Default quality profile used when no request-specific profile is given.",
+      "type": "string",
+      "enum": ["small", "balanced", "high", "custom"]
+    },
+    "outputDirectory": {
+      "description": "Directory GIFs are written to; created if missing. Defaults to ./output. Writing outside the project root requires allowOutsideProject plus explicit approval.",
+      "type": "string",
+      "minLength": 1
+    },
+    "loop": {
+      "description": "Loop behavior. 'forever' loops infinitely; 'once' equals a count of 1; an integer N >= 1 plays N times. 0 is rejected.",
+      "oneOf": [
+        { "type": "string", "enum": ["forever", "once"] },
+        { "type": "integer", "minimum": 1 }
+      ]
+    },
+    "collisionPolicy": {
+      "description": "How to handle an existing output file. 'ask' is the skill-layer policy (engine reports collisions, the agent asks, then re-runs with an explicit engine policy). Engine policies are fail, overwrite, unique, skip. Default fail at the engine; ask at the skill layer.",
+      "type": "string",
+      "enum": ["ask", "fail", "overwrite", "unique", "skip"]
+    },
+    "continueOnError": {
+      "description": "When true, a runtime failure on one clip does not stop remaining clips in a batch.",
+      "type": "boolean"
+    },
+    "keepTemporaryFiles": {
+      "description": "Debug only. When true, palette and temporary files are kept instead of being cleaned up. Disabled by default.",
+      "type": "boolean"
+    },
+    "allowOutsideProject": {
+      "description": "Must be true (and explicitly approved) before the engine writes outside the project root.",
+      "type": "boolean"
+    },
+    "remoteSources": {
+      "description": "Remote source policy. Fixed at 'disabled' in v0.1.0; remote acquisition is a v0.2.0 feature.",
+      "type": "string",
+      "enum": ["disabled"]
+    },
+    "limits": {
+      "description": "Resource-safety limits (spec SEC-011).",
+      "type": "object",
+      "properties": {
+        "maxClipProcessingSeconds": {
+          "description": "Per-clip wall-clock processing timeout in seconds. Default 600. Exceeding it fails with RESOURCE_LIMIT_EXCEEDED (exit 13).",
+          "type": "integer",
+          "minimum": 1,
+          "default": 600
+        },
+        "maxTemporaryBytes": {
+          "description": "Ceiling on temporary-disk usage per job, in bytes. Default 2147483648 (2 GiB). Exceeding it fails with RESOURCE_LIMIT_EXCEEDED (exit 13).",
+          "type": "integer",
+          "minimum": 1,
+          "default": 2147483648
+        }
+      }
+    }
+  }
+}

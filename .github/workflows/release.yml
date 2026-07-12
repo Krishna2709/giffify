@@ -1,0 +1,235 @@
+name: Release
+
+# Tag-driven release pipeline. Pushing an annotated tag `vX.Y.Z` runs the full
+# test matrix (spec §22.3), builds the Claude and Codex packages, runs the
+# release-integrity checks (tools/validate_release.py), and publishes a GitHub
+# Release with checksummed tar.gz + zip archives of each platform package.
+#
+# The version in the tag MUST equal pyproject.toml's [project].version; the
+# verify job fails fast otherwise, and tools/validate_release.py separately
+# enforces agreement across CHANGELOG.md, both plugin manifests, and both
+# marketplace files.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# Default (least-privilege) token for every job; build-and-release opts up to
+# contents: write where it actually creates the Release.
+permissions:
+  contents: read
+
+# Never write .pyc/__pycache__ so the test suites cannot leave bytecode
+# byproducts in the canonical skill source before the build step runs on the
+# same checkout (spec §27 DoD). Mirrors .github/workflows/ci.yml.
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
+# One in-flight release per tag ref. cancel-in-progress is false so a running
+# publish is never interrupted; a duplicate tag push queues behind it and then
+# fails fast on the "release already exists" guard in the verify job.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # --- Gate: tag<->version agreement and no-double-release guard --------------
+  verify:
+    name: Verify tag and version
+    runs-on: ubuntu-latest
+    steps:
+      # Supply-chain hygiene: official actions only, pinned to full commit SHAs.
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      # validate_release.py inspects packages/ (built later), so it cannot run
+      # here; the only pre-build gate is that the tag matches pyproject.toml.
+      - name: Assert tag matches pyproject version
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          proj="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          echo "tag=${tag} pyproject=${proj}"
+          if [ "${tag}" != "${proj}" ]; then
+            echo "::error::Release tag v${tag} does not match pyproject.toml version ${proj}"
+            exit 1
+          fi
+
+      - name: Fail if a release already exists for this tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "::error::A GitHub Release for ${GITHUB_REF_NAME} already exists; refusing to double-release."
+            exit 1
+          fi
+          echo "No existing release for ${GITHUB_REF_NAME}; proceeding."
+
+  # --- Full spec §22.3 matrix, mirroring ci.yml ------------------------------
+  test:
+    name: ${{ matrix.os }} / py${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # --- Install FFmpeg per operating system (spec §6.3), mirroring ci.yml --
+      - name: Install FFmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install FFmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+
+      - name: Install FFmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg -y
+
+      - name: Verify FFmpeg and ffprobe
+        shell: bash
+        run: |
+          ffmpeg -version
+          ffprobe -version
+
+      # --- Test suites -------------------------------------------------------
+      # A release runs all four suites unconditionally (unlike ci.yml's
+      # "if present" guards): a release must never publish with a suite missing.
+      - name: Run unit tests
+        run: python -m unittest discover -s tests/unit -v
+
+      - name: Run integration tests
+        run: python -m unittest discover -s tests/integration -v
+
+      - name: Run security tests
+        run: python -m unittest discover -s tests/security -v
+
+      - name: Run acceptance tests
+        run: python -m unittest discover -s tests/acceptance -v
+
+  # --- Build, validate, archive, and publish ---------------------------------
+  build-and-release:
+    name: Build and publish release
+    needs: [verify, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub Release and upload assets
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Resolve release version
+        shell: bash
+        run: |
+          v="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          echo "VERSION=${v}" >> "${GITHUB_ENV}"
+          echo "Resolved release version: ${v}"
+
+      - name: Build packages
+        run: python3 tools/build_packages.py
+
+      - name: Validate release
+        run: python3 tools/validate_release.py
+
+      - name: Package release archives
+        shell: bash
+        run: |
+          mkdir -p dist
+          for platform in claude codex; do
+            tar -czf "dist/video-to-gif-${platform}-${VERSION}.tar.gz" \
+              -C "packages/${platform}" video-to-gif
+            ( cd "packages/${platform}" && \
+              zip -qr "${GITHUB_WORKSPACE}/dist/video-to-gif-${platform}-${VERSION}.zip" video-to-gif )
+          done
+          ls -l dist
+
+      - name: Generate SHA256SUMS
+        shell: bash
+        run: |
+          ( cd dist && sha256sum \
+              "video-to-gif-claude-${VERSION}.tar.gz" \
+              "video-to-gif-claude-${VERSION}.zip" \
+              "video-to-gif-codex-${VERSION}.tar.gz" \
+              "video-to-gif-codex-${VERSION}.zip" > SHA256SUMS )
+          cat dist/SHA256SUMS
+
+      - name: Extract release notes from CHANGELOG
+        id: notes
+        shell: bash
+        run: |
+          mkdir -p dist
+          python3 - "$VERSION" <<'PY'
+          import os, re, sys, pathlib
+          version = sys.argv[1]
+          changelog = pathlib.Path("CHANGELOG.md")
+          out = pathlib.Path("dist/RELEASE_NOTES.md")
+          found = False
+          if changelog.is_file():
+              lines = changelog.read_text(encoding="utf-8").splitlines()
+              header = re.compile(r"^##\s*\[" + re.escape(version) + r"\]")
+              start = next((i for i, ln in enumerate(lines) if header.match(ln)), None)
+              if start is not None:
+                  body = []
+                  for ln in lines[start + 1:]:
+                      # Stop at the next section header or the link-reference block.
+                      if re.match(r"^##\s", ln) or re.match(r"^\[[^\]]+\]:\s", ln):
+                          break
+                      body.append(ln)
+                  notes = "\n".join(body).strip()
+                  if notes:
+                      out.write_text(notes + "\n", encoding="utf-8")
+                      found = True
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write("found=%s\n" % ("true" if found else "false"))
+          print("release notes extracted from CHANGELOG:", found)
+          PY
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          assets=(
+            "dist/video-to-gif-claude-${VERSION}.tar.gz"
+            "dist/video-to-gif-claude-${VERSION}.zip"
+            "dist/video-to-gif-codex-${VERSION}.tar.gz"
+            "dist/video-to-gif-codex-${VERSION}.zip"
+            "dist/SHA256SUMS"
+          )
+          if [ "${{ steps.notes.outputs.found }}" = "true" ]; then
+            notes_args=(--notes-file dist/RELEASE_NOTES.md)
+          else
+            echo "No CHANGELOG section for ${VERSION}; falling back to --generate-notes."
+            notes_args=(--generate-notes)
+          fi
+          gh release create "${GITHUB_REF_NAME}" \
+            "${assets[@]}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "video-to-gif ${GITHUB_REF_NAME}" \
+            --verify-tag \
+            "${notes_args[@]}"

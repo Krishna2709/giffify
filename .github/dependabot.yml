@@ -1,0 +1,16 @@
+version: 2
+
+# Keep the GitHub Actions used by our workflows (ci.yml, release.yml,
+# codeql.yml) up to date. Dependabot opens PRs that bump the pinned action
+# SHAs and refresh the accompanying version comment.
+#
+# NOTE: there is deliberately no "pip" (or any language-package) ecosystem
+# here. The project is standard-library only by specification (spec §6.2): the
+# core runtime has zero third-party runtime dependencies, so there is no
+# requirements.txt / locked dependency set for Dependabot to track. This
+# omission is intentional, not an oversight.
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly

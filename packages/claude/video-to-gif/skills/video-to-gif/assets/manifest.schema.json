@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://video-to-gif.dev/schemas/manifest.schema.json",
+  "title": "video-to-gif JSON manifest",
+  "description": "Schema for JSON batch manifests (spec section 10). Manifest values are treated purely as data: no shell expressions, no environment expansion, no command substitution, no code (spec SEC-009). Unknown fields/columns are warned about rather than rejected, so additionalProperties is left permissive.",
+  "type": "object",
+  "required": ["schemaVersion", "input", "clips"],
+  "properties": {
+    "schemaVersion": {
+      "description": "Manifest schema version. Must be 1 for this release.",
+      "const": 1
+    },
+    "input": {
+      "description": "Local path to the source video. Remote URLs are not supported in v0.1.0.",
+      "type": "string",
+      "minLength": 1
+    },
+    "outputDirectory": {
+      "description": "Directory GIFs are written to; created if missing. Defaults to ./output.",
+      "type": "string",
+      "minLength": 1
+    },
+    "profile": { "$ref": "#/$defs/profile" },
+    "loop": { "$ref": "#/$defs/loop" },
+    "continueOnError": {
+      "description": "When true, a runtime failure on one clip does not stop remaining clips.",
+      "type": "boolean"
+    },
+    "collisionPolicy": {
+      "description": "How to handle an existing output file. Engine policies: fail (default), overwrite, unique, skip.",
+      "type": "string",
+      "enum": ["fail", "overwrite", "unique", "skip"]
+    },
+    "width": { "$ref": "#/$defs/width" },
+    "fps": { "$ref": "#/$defs/fps" },
+    "colors": { "$ref": "#/$defs/colors" },
+    "allowUpscale": {
+      "description": "When true, the engine may upscale a source narrower than the profile maximum width. Off by default.",
+      "type": "boolean"
+    },
+    "clips": {
+      "description": "One or more clip definitions. Clip-level fields override top-level fields.",
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/clip" }
+    }
+  },
+  "$defs": {
+    "timestamp": {
+      "description": "A timestamp: a non-negative number of seconds (optional fraction) or a string in seconds, MM:SS, or HH:MM:SS form with optional .mmm.",
+      "oneOf": [
+        { "type": "number", "minimum": 0 },
+        {
+          "type": "string",
+          "pattern": "^(\\d+(\\.\\d{1,3})?|\\d{1,2}:\\d{2}(\\.\\d{1,3})?|\\d{1,3}:\\d{2}:\\d{2}(\\.\\d{1,3})?)$"
+        }
+      ]
+    },
+    "duration": {
+      "description": "A strictly positive duration: a number of seconds (optional fraction) or a timestamp-format string. Normalized internally to integer milliseconds.",
+      "oneOf": [
+        { "type": "number", "exclusiveMinimum": 0 },
+        {
+          "type": "string",
+          "pattern": "^(\\d+(\\.\\d{1,3})?|\\d{1,2}:\\d{2}(\\.\\d{1,3})?|\\d{1,3}:\\d{2}:\\d{2}(\\.\\d{1,3})?)$"
+        }
+      ]
+    },
+    "loop": {
+      "description": "Loop behavior. 'forever' loops infinitely; 'once' equals a count of 1; an integer N >= 1 plays N times. 0 is rejected.",
+      "oneOf": [
+        { "type": "string", "enum": ["forever", "once"] },
+        { "type": "integer", "minimum": 1 }
+      ]
+    },
+    "profile": {
+      "description": "Quality profile name.",
+      "type": "string",
+      "enum": ["small", "balanced", "high", "custom"]
+    },
+    "width": {
+      "description": "Maximum output width in pixels (aspect ratio preserved; no upscaling by default).",
+      "type": "integer",
+      "minimum": 1
+    },
+    "fps": {
+      "description": "Target frames per second (capped at the source frame rate).",
+      "type": "integer",
+      "minimum": 1
+    },
+    "colors": {
+      "description": "Maximum palette colors (GIF supports up to 256).",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 256
+    },
+    "clip": {
+      "type": "object",
+      "description": "A single clip: requires start plus at least one of end or duration. When both end and duration are present the engine additionally validates that they resolve to the same end timestamp (start + duration == end); JSON Schema cannot compute that, so it is enforced by the engine and mismatched pairs are rejected.",
+      "required": ["start"],
+      "properties": {
+        "name": {
+          "description": "Optional output name (without extension). MUST NOT contain path separators or escape the output directory.",
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^/\\\\]+$"
+        },
+        "start": { "$ref": "#/$defs/timestamp" },
+        "end": { "$ref": "#/$defs/timestamp" },
+        "duration": { "$ref": "#/$defs/duration" },
+        "profile": { "$ref": "#/$defs/profile" },
+        "width": { "$ref": "#/$defs/width" },
+        "fps": { "$ref": "#/$defs/fps" },
+        "colors": { "$ref": "#/$defs/colors" },
+        "loop": { "$ref": "#/$defs/loop" }
+      },
+      "anyOf": [
+        {
+          "description": "provides an end timestamp",
+          "required": ["end"]
+        },
+        {
+          "description": "provides a duration",
+          "required": ["duration"]
+        }
+      ]
+    }
+  }
+}

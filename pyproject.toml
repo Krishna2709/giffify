@@ -1,0 +1,128 @@
+# pyproject.toml — project metadata for the video-to-gif Agent Skill.
+#
+# Scope note: this project is distributed as an Agent Skill (SKILL.md + scripts/
+# + references/ + assets/) wrapped in Claude Code and Codex plugins, NOT as a
+# PyPI package. This file therefore declares metadata only. The core runtime is
+# Python standard library exclusively (spec §6.2), so there are no runtime
+# dependencies, and the test suite uses stdlib `unittest`, so there are no test
+# dependencies either.
+#
+# Plugin/skill name is final (spec §26 decision 1, resolved): video-to-gif,
+# hosted in the giffify repository (github.com/Krishna2709/giffify).
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "video-to-gif"
+version = "0.1.0"
+description = "Convert explicit timestamp ranges from local video files into optimized animated GIFs. Portable Agent Skill for Claude Code and Codex."
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["ffmpeg", "gif", "video", "agent-skill", "claude-code", "codex"]
+
+authors = [{ name = "Krishna2709" }]
+maintainers = [{ name = "Krishna2709" }]
+
+license = { text = "MIT" }
+
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Multimedia :: Video :: Conversion",
+]
+
+# No runtime dependencies: the core engine uses only the Python standard library
+# and the external `ffmpeg`/`ffprobe` executables (which are NOT Python packages).
+dependencies = []
+
+[project.urls]
+Documentation = "https://github.com/Krishna2709/giffify/tree/main/docs"
+Repository = "https://github.com/Krishna2709/giffify"
+Changelog = "https://github.com/Krishna2709/giffify/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+# Tests use the standard library `unittest` runner exclusively (spec §22 / CLAUDE.md),
+# so there are intentionally no test dependencies. The `dev` group carries only the
+# static-analysis tooling (linter + type checker); it is never imported by the
+# runtime, which stays standard-library-only (spec §6.2).
+dev = ["ruff", "mypy"]
+
+[tool.setuptools]
+# This project ships an Agent Skill, not an importable Python distribution, so
+# there is nothing to auto-discover. Declaring an empty module list keeps the
+# metadata valid without pulling src/, tools/, tests/, etc. into a build.
+py-modules = []
+
+# ---------------------------------------------------------------------------
+# Ruff — linter + formatter (dev-only; not a runtime dependency, spec §6.2).
+# ---------------------------------------------------------------------------
+[tool.ruff]
+# Python 3.10 floor (spec §6.2). Keeps rewrites 3.10-compatible.
+target-version = "py310"
+line-length = 100
+# Never lint generated output (packages/ is byte-identical build output) or the
+# legacy throwaway prototype (pygiffy.py is explicitly out of scope).
+extend-exclude = ["packages", "pygiffy.py"]
+
+[tool.ruff.lint]
+# Pragmatic, high-value set: pycodestyle errors/warnings (E/W), Pyflakes (F),
+# isort (I), pyupgrade (UP), flake8-bugbear (B), flake8-simplify (SIM),
+# flake8-comprehensions (C4), and Ruff-native checks (RUF). Deliberately NOT
+# flake8-builtins (A): vtg/inspect.py shadows the stdlib `inspect` module name,
+# which is spec-mandated (§5) and must not be renamed.
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "RUF"]
+
+[tool.ruff.lint.isort]
+# The engine package is the only first-party import root.
+known-first-party = ["vtg"]
+
+# ---------------------------------------------------------------------------
+# Mypy — static type checking (dev-only; not a runtime dependency, spec §6.2).
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.10"
+# The engine (`vtg`), the packaging tools, and the test fixtures live in three
+# separate roots that the runtime puts on sys.path dynamically; mirror that for
+# mypy so `import vtg`, `import generate_test_video`, and `from fixtures.base
+# import ...` all resolve. explicit_package_bases + namespace_packages let the
+# suites (which have no tests/__init__.py) resolve without module-name clashes.
+mypy_path = "src/skill/video-to-gif/scripts:tools:tests:tests/unit"
+explicit_package_bases = true
+namespace_packages = true
+files = ["src/skill/video-to-gif/scripts", "tools", "tests"]
+exclude = "(^|/)pygiffy\\.py$"
+
+# Applies everywhere, tests included: bodies are always type-checked, optionals
+# are explicit, and stray ignores/casts are reported. disallow_untyped_defs is
+# relaxed at this level (so test methods can stay bare `def test_x(self):`) and
+# re-enabled for the engine and tools below.
+check_untyped_defs = true
+no_implicit_optional = true
+warn_return_any = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+# Engine and packaging tools: full untyped-def strictness (every def annotated).
+# The test suites deliberately stay relaxed (still fully checked via the flags
+# above); fixture helpers and base classes are annotated regardless.
+module = [
+    "vtg.*",
+    "video_to_gif",
+    "build_packages",
+    "validate_release",
+    "generate_test_video",
+]
+disallow_untyped_defs = true

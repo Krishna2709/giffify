@@ -1,0 +1,130 @@
+name: CI
+
+# Continuous integration matrix required by spec §22.3 (MUST):
+# Ubuntu, macOS, and Windows x Python 3.10 and a newer stable Python (3.12).
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never write .pyc/__pycache__ during CI so the test suites cannot leave bytecode
+# byproducts in the canonical skill source before the build step runs on the same
+# checkout (spec §27 DoD). build_packages.py also prunes bytecode defensively.
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint (ruff + mypy)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # ruff and mypy are dev-only tools; the runtime stays stdlib-only (spec §6.2).
+      - name: Install lint tooling
+        run: pip install ruff mypy
+
+      - name: Ruff lint
+        run: ruff check .
+
+      - name: Ruff format check
+        run: ruff format --check .
+
+      - name: Mypy
+        run: mypy
+
+  test:
+    name: ${{ matrix.os }} / py${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # --- Install FFmpeg per operating system (spec §6.3) --------------------
+      - name: Install FFmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install FFmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+
+      - name: Install FFmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg -y
+
+      - name: Verify FFmpeg and ffprobe
+        shell: bash
+        run: |
+          ffmpeg -version
+          ffprobe -version
+
+      # --- Test suites -------------------------------------------------------
+      - name: Run unit tests
+        run: python -m unittest discover -s tests/unit -v
+
+      # Integration/security/acceptance suites may land later; only run each if
+      # its directory exists so the matrix stays green until they arrive.
+      - name: Run integration tests (if present)
+        shell: bash
+        run: |
+          if [ -d tests/integration ]; then
+            python -m unittest discover -s tests/integration -v
+          else
+            echo "tests/integration not present yet; skipping."
+          fi
+
+      - name: Run security tests (if present)
+        shell: bash
+        run: |
+          if [ -d tests/security ]; then
+            python -m unittest discover -s tests/security -v
+          else
+            echo "tests/security not present yet; skipping."
+          fi
+
+      - name: Run acceptance tests (if present)
+        shell: bash
+        run: |
+          if [ -d tests/acceptance ]; then
+            python -m unittest discover -s tests/acceptance -v
+          else
+            echo "tests/acceptance not present yet; skipping."
+          fi
+
+      # --- Package build + release validation (one matrix leg only) ----------
+      - name: Build packages
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        run: python tools/build_packages.py
+
+      - name: Validate release
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        run: python tools/validate_release.py

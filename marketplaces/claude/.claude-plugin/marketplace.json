@@ -1,0 +1,22 @@
+{
+  "name": "video-to-gif-marketplace",
+  "owner": {
+    "name": "Krishna2709",
+    "url": "https://github.com/Krishna2709"
+  },
+  "metadata": {
+    "description": "Self-hosted Claude Code marketplace for the video-to-gif plugin.",
+    "note": "Published from the giffify repository (https://github.com/Krishna2709/giffify)."
+  },
+  "plugins": [
+    {
+      "name": "video-to-gif",
+      "source": "./packages/claude/video-to-gif",
+      "description": "Generate optimized animated GIFs from explicit video timestamp ranges.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Krishna2709"
+      }
+    }
+  ]
+}

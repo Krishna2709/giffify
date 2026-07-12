@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+
+# Engine output
+output/
+
+# Local workspace files — not part of the project
+.remember/
+excalidraw.log
+dn_v1.gif
+.DS_Store
