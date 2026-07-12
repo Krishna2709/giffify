@@ -59,6 +59,23 @@ request, and this policy will be updated before any such feature ships. Any
 future telemetry would be opt-in only and preceded by a policy update — the
 current version has none.
 
+## Content responsibility
+
+video-to-gif is a processing tool. It does not host, distribute, moderate, or
+inspect the meaning of any content. You, the user, are solely responsible for:
+
+- ensuring you own the videos you process, have permission to use them, or
+  otherwise have a lawful basis to do so;
+- complying with copyright law, platform terms of service, and any other
+  applicable rules for the source material; and
+- how you use, share, or publish the GIFs you create.
+
+The maintainers and contributors provide the software "as is" under the MIT
+License and accept no responsibility or liability for the content users
+process with it or for any infringement arising from that use. The tool will
+not bypass DRM or access controls, and future remote-source features will ask
+you to confirm you have the right to use a source before fetching it.
+
 ## Changes and contact
 
 Changes to this policy are versioned in this repository's history. Questions
