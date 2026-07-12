@@ -26,6 +26,7 @@ EXIT_CANCELLED = 10  # Operation cancelled
 EXIT_PARTIAL = 11  # Partial batch success
 EXIT_INTERNAL = 12  # Internal engine error
 EXIT_RESOURCE_LIMIT = 13  # Resource limit exceeded
+EXIT_REMOTE_FAILURE = 14  # Remote acquisition failure (v0.2.0, spec section 14)
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +56,17 @@ CANCELLED = "CANCELLED"
 INTERNAL_ERROR = "INTERNAL_ERROR"
 RESOURCE_LIMIT_EXCEEDED = "RESOURCE_LIMIT_EXCEEDED"
 
+# Remote source acquisition error codes (v0.2.0, spec FR-018..023 / SEC-012..017).
+# UNSUPPORTED_REMOTE_SOURCE (above) remains the documented v0.1.0 behavior; in
+# v0.2.0 a URL supplied while remote sources are disabled reports REMOTE_DISABLED.
+REMOTE_DISABLED = "REMOTE_DISABLED"
+UNSUPPORTED_URL_SCHEME = "UNSUPPORTED_URL_SCHEME"
+DRM_PROTECTED = "DRM_PROTECTED"
+PRIVATE_NETWORK_BLOCKED = "PRIVATE_NETWORK_BLOCKED"
+REMOTE_TOO_LARGE = "REMOTE_TOO_LARGE"
+REMOTE_DOWNLOAD_FAILED = "REMOTE_DOWNLOAD_FAILED"
+YTDLP_MISSING = "YTDLP_MISSING"
+
 # Result status values (spec section 13.2)
 STATUS_SUCCESS = "success"
 STATUS_PARTIAL = "partial_success"
@@ -62,6 +74,7 @@ STATUS_FAILED = "failed"
 STATUS_VALIDATION_FAILED = "validation_failed"
 STATUS_COLLISION = "collision"
 STATUS_DEPENDENCY_MISSING = "dependency_missing"
+STATUS_REMOTE_DISABLED = "remote_disabled"  # v0.2.0, spec section 13.2 / FR-018
 STATUS_CANCELLED = "cancelled"
 STATUS_DRY_RUN = "dry_run"
 

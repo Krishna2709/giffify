@@ -220,7 +220,11 @@ class TestCreate(CLIBase):
         )
         self.assertEqual(code, errors.EXIT_INVALID_TIMESTAMP)
 
-    def test_remote_source_rejected(self):
+    def test_remote_source_rejected_when_disabled(self):
+        # v0.2.0 FR-018: a URL supplied while remoteSources is disabled (the
+        # default) is rejected with REMOTE_DISABLED / exit 8 / status
+        # remote_disabled, and nothing is inspected or encoded. (In v0.1.0 this
+        # reported UNSUPPORTED_REMOTE_SOURCE / exit 5; the spec supersedes it.)
         code, result = self.run_cli(
             [
                 "create",
@@ -233,8 +237,9 @@ class TestCreate(CLIBase):
                 "--json",
             ]
         )
-        self.assertEqual(code, errors.EXIT_INVALID_MEDIA)
-        self.assertEqual(result["error"]["code"], errors.UNSUPPORTED_REMOTE_SOURCE)
+        self.assertEqual(code, errors.EXIT_PERMISSION)
+        self.assertEqual(result["status"], "remote_disabled")
+        self.assertEqual(result["error"]["code"], errors.REMOTE_DISABLED)
         # No inspection/encoding attempted.
         self.assertEqual(len(self.recorder.calls), 0)
 

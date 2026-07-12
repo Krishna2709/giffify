@@ -19,8 +19,9 @@ from dataclasses import dataclass
 from types import FrameType
 from typing import Any, NoReturn
 
-from . import __version__, dependencies, errors, ffmpeg, manifests, models, naming, paths
+from . import __version__, cleanup, dependencies, errors, ffmpeg, manifests, models, naming, paths
 from . import config as config_mod
+from . import remote as remote_mod
 from .inspect import inspect_source
 from .models import BUILTIN_PROFILES, ClipSpec, EffectiveSettings, SourceInfo
 from .progress import ProgressReporter
@@ -73,6 +74,35 @@ def build_parser() -> argparse.ArgumentParser:
             "--no-progress", action="store_true", help="Disable JSON Lines progress on stderr."
         )
 
+    def add_remote(p: argparse.ArgumentParser) -> None:
+        # Opt-in remote source acquisition (spec section 12.8, FR-018..022).
+        p.add_argument(
+            "--allow-remote",
+            action="store_true",
+            help="Permit remote (http/https) source acquisition for this run (FR-018).",
+        )
+        p.add_argument(
+            "--keep-remote-source",
+            action="store_true",
+            help="Retain the downloaded remote source and report its path (FR-020).",
+        )
+        p.add_argument(
+            "--remote-adapter",
+            choices=["ytdlp"],
+            help="Acquire a video-page URL through the optional yt-dlp adapter (FR-022).",
+        )
+        p.add_argument(
+            "--allow-insecure-http",
+            action="store_true",
+            help="Acknowledge and permit an unencrypted http remote source (SEC-013).",
+        )
+        p.add_argument(
+            "--allow-remote-address",
+            action="append",
+            metavar="IP",
+            help="Explicitly approve a private/loopback IP for SSRF checks (SEC-014); repeatable.",
+        )
+
     p_doctor = sub.add_parser("doctor", help="Check the environment and dependencies.")
     p_doctor.add_argument(
         "--output-directory", help="Optionally check this output directory is writable."
@@ -80,7 +110,9 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(p_doctor)
 
     p_inspect = sub.add_parser("inspect", help="Inspect source media with ffprobe.")
-    p_inspect.add_argument("--input", required=True, help="Path to the source video.")
+    p_inspect.add_argument("--input", required=True, help="Path to the source video or URL.")
+    p_inspect.add_argument("--config", help="Explicit config file path.")
+    add_remote(p_inspect)
     add_common(p_inspect)
 
     p_create = sub.add_parser("create", help="Create one GIF from a timestamp range.")
@@ -104,6 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="fail",
     )
     p_create.add_argument("--config", help="Explicit config file path.")
+    add_remote(p_create)
     add_common(p_create)
 
     p_batch = sub.add_parser("batch", help="Create multiple GIFs from a manifest.")
@@ -120,6 +153,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="fail",
     )
     p_batch.add_argument("--config", help="Explicit config file path.")
+    add_remote(p_batch)
     add_common(p_batch)
 
     p_vc = sub.add_parser("validate-config", help="Validate a configuration file.")
@@ -195,6 +229,93 @@ def _error_result(command: str, exc: errors.EngineError, warnings: list[str]) ->
         "error": exc.to_dict(),
         "warnings": warnings or [],
     }
+
+
+# ---------------------------------------------------------------------------
+# Remote source acquisition (spec section 12.8, FR-018..023)
+# ---------------------------------------------------------------------------
+
+
+class _JobCleanup:
+    """Tracks a downloaded remote source so it is removed after the job.
+
+    A retained source (keepRemoteSource / --keep-remote-source) is preserved like
+    a completed output; otherwise the whole secure temp dir is removed on success,
+    failure, or cancellation (spec section 16 / FR-020).
+    """
+
+    def __init__(self) -> None:
+        self.remote: remote_mod.RemoteResult | None = None
+
+    def cleanup(self) -> None:
+        r = self.remote
+        if r is not None and not r.retained:
+            cleanup.remove_paths([r.temp_dir])
+
+
+def _acquire_remote(
+    raw: str,
+    args: argparse.Namespace,
+    cfg: config_mod.Config,
+    reporter: ProgressReporter,
+    job: _JobCleanup,
+) -> str:
+    """Gate (FR-018) then acquire a remote URL; return the local download path."""
+    remote_mod.ensure_remote_permitted(
+        raw, cfg.remote_sources, bool(getattr(args, "allow_remote", False))
+    )
+    result = remote_mod.acquire_remote_source(
+        raw,
+        adapter=getattr(args, "remote_adapter", None),
+        allow_insecure_http=bool(getattr(args, "allow_insecure_http", False)),
+        max_download_bytes=cfg.max_download_bytes,
+        max_download_seconds=cfg.max_download_seconds,
+        reporter=reporter,
+        cancel_event=_CANCEL_EVENT,
+        approved_addresses=frozenset(getattr(args, "allow_remote_address", None) or []),
+    )
+    result.retained = bool(getattr(args, "keep_remote_source", False)) or cfg.keep_remote_source
+    job.remote = result
+    # The download is untrusted LOCAL media from here on (SEC-012).
+    paths.ensure_source_readable(result.local_path)
+    return result.local_path
+
+
+def _resolve_source(
+    raw: str,
+    args: argparse.Namespace,
+    *,
+    project_root: str,
+    cfg: config_mod.Config,
+    reporter: ProgressReporter,
+    job: _JobCleanup,
+) -> str:
+    """Resolve a source string to a local path, downloading it first if a URL."""
+    if paths.url_scheme(raw) is not None:
+        return _acquire_remote(raw, args, cfg, reporter, job)
+    source_path = paths.resolve_source_path(raw, project_root=project_root)
+    paths.ensure_source_readable(source_path)
+    return source_path
+
+
+def _annotate_remote(result: dict[str, Any], job: _JobCleanup) -> None:
+    """Add the additive remote block and redact any leaked source path (FR-023)."""
+    r = job.remote
+    if r is None:
+        return
+    result["remoteSource"] = r.to_public()
+    src = result.get("source")
+    if isinstance(src, dict):
+        # Never expose the internal temp path; show the redacted URL instead.
+        src["path"] = r.redacted_url
+    if r.warnings:
+        existing = result.get("warnings") or []
+        result["warnings"] = list(dict.fromkeys([*existing, *r.warnings]))
+
+
+def _emit_job(result: dict[str, Any], args: argparse.Namespace, job: _JobCleanup) -> None:
+    _annotate_remote(result, job)
+    _emit(result, getattr(args, "json", False))
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +497,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         "checks": report["checks"],
         "ffmpeg": report["ffmpeg"],
         "ffprobe": report["ffprobe"],
+        "ytdlp": report["ytdlp"],
         "installGuidance": report["installGuidance"],
         "warnings": [],
     }
@@ -384,39 +506,31 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def _cmd_inspect(args: argparse.Namespace) -> int:
-    project_root = paths.resolve_project_root(os.getcwd())
-    tools = dependencies.require_ffmpeg_tools()
-    source_path = paths.resolve_source_path(args.input, project_root=project_root)
-    paths.ensure_source_readable(source_path)
-    source = inspect_source(tools["ffprobe"], source_path)
-    result = {
-        "schemaVersion": SCHEMA_VERSION,
-        "command": "inspect",
-        "status": errors.STATUS_SUCCESS,
-        "source": source.to_public(),
-        "warnings": source.warnings,
-    }
-    _emit(result, args.json)
-    return errors.EXIT_SUCCESS
-
-
-def _resolve_source_for_job(
-    args: argparse.Namespace,
-    project_root: str,
-    manifest_input: str | None,
-) -> str:
-    raw = _first(getattr(args, "input", None), manifest_input)
-    if not raw:
-        raise errors.EngineError(
-            errors.INPUT_NOT_FOUND,
-            "No source specified. Provide --input or set 'input' in the manifest.",
-            exit_code=errors.EXIT_INPUT_NOT_FOUND,
-            status=errors.STATUS_FAILED,
-            stage="input",
+    reporter = ProgressReporter(enabled=not args.no_progress)
+    job = _JobCleanup()
+    try:
+        project_root = paths.resolve_project_root(os.getcwd())
+        cfg = config_mod.resolve_config(
+            explicit_path=getattr(args, "config", None), project_root=project_root
         )
-    source_path = paths.resolve_source_path(raw, project_root=project_root)
-    paths.ensure_source_readable(source_path)
-    return source_path
+        tools = dependencies.require_ffmpeg_tools()
+        # inspect on a URL acquires the source first (network-isolated ffprobe,
+        # SEC-010 / section 12.8).
+        source_path = _resolve_source(
+            args.input, args, project_root=project_root, cfg=cfg, reporter=reporter, job=job
+        )
+        source = inspect_source(tools["ffprobe"], source_path)
+        result = {
+            "schemaVersion": SCHEMA_VERSION,
+            "command": "inspect",
+            "status": errors.STATUS_SUCCESS,
+            "source": source.to_public(),
+            "warnings": list(source.warnings),
+        }
+        _emit_job(result, args, job)
+        return errors.EXIT_SUCCESS
+    finally:
+        job.cleanup()
 
 
 def _clip_result(planned: PlannedClip, conv: ffmpeg.ConversionResult) -> dict[str, Any]:
@@ -601,7 +715,13 @@ def _dry_run_result(
     }
 
 
-def _prepare_job(args: argparse.Namespace, command: str) -> dict[str, Any]:
+def _prepare_job(
+    args: argparse.Namespace,
+    command: str,
+    *,
+    reporter: ProgressReporter,
+    job: _JobCleanup,
+) -> dict[str, Any]:
     """Shared preflight for create/batch. Returns a context dict."""
     project_root = paths.resolve_project_root(os.getcwd())
     cfg = config_mod.resolve_config(
@@ -618,7 +738,20 @@ def _prepare_job(args: argparse.Namespace, command: str) -> dict[str, Any]:
     tools = dependencies.require_ffmpeg_tools()
 
     manifest_input = manifest.input if manifest else None
-    source_path = _resolve_source_for_job(args, project_root, manifest_input)
+    raw_source = _first(getattr(args, "input", None), manifest_input)
+    if not raw_source:
+        raise errors.EngineError(
+            errors.INPUT_NOT_FOUND,
+            "No source specified. Provide --input or set 'input' in the manifest.",
+            exit_code=errors.EXIT_INPUT_NOT_FOUND,
+            status=errors.STATUS_FAILED,
+            stage="input",
+        )
+    # A URL is gated (FR-018) and downloaded to a temp dir here; local paths are
+    # resolved exactly as in v0.1.0.
+    source_path = _resolve_source(
+        raw_source, args, project_root=project_root, cfg=cfg, reporter=reporter, job=job
+    )
     source = inspect_source(tools["ffprobe"], source_path)
     warnings.extend(source.warnings)
 
@@ -738,102 +871,110 @@ def _build_create_clip(args: argparse.Namespace) -> ClipSpec:
 
 
 def _cmd_create(args: argparse.Namespace) -> int:
-    ctx = _prepare_job(args, "create")
-    source: SourceInfo = ctx["source"]
-    clip = _build_create_clip(args)
-
-    valid, skipped_invalid = validate_and_filter(
-        [clip], source.duration_ms, args.invalid_timestamp_policy
-    )
-    if not valid:
-        # Single clip skipped as invalid.
-        result = _empty_job_result(
-            "create", source, ctx["output_dir"], skipped_invalid, ctx["warnings"]
-        )
-        _emit(result, args.json)
-        return errors.EXIT_SUCCESS
-
-    planned = plan_outputs(
-        valid,
-        source,
-        output_dir=ctx["output_dir"],
-        collision_policy=ctx["collision_policy"],
-        resolve_settings=ctx["resolver"],
-    )
-    if any(p.action == "collision" for p in planned):
-        result = _collision_result("create", planned, ctx["output_dir"], ctx["warnings"])
-        _emit(result, args.json)
-        return errors.EXIT_COLLISION
-
-    paths.ensure_directory(ctx["output_dir"])
     reporter = ProgressReporter(enabled=not args.no_progress)
-    created, failed, skipped = _run_conversions(
-        planned,
-        source,
-        ctx["cfg"],
-        ctx["tools"],
-        reporter,
-        continue_on_error=ctx["continue_on_error"],
-    )
-    skipped = skipped_invalid + skipped
+    job = _JobCleanup()
+    try:
+        ctx = _prepare_job(args, "create", reporter=reporter, job=job)
+        source: SourceInfo = ctx["source"]
+        clip = _build_create_clip(args)
 
-    status = _finalize_status(created, failed, 1)
-    result = _job_result(
-        "create", source, ctx["output_dir"], created, failed, skipped, ctx["warnings"], 1
-    )
-    result["status"] = status
-    _emit(result, args.json)
-    return _job_exit_code(status, created, failed)
+        valid, skipped_invalid = validate_and_filter(
+            [clip], source.duration_ms, args.invalid_timestamp_policy
+        )
+        if not valid:
+            # Single clip skipped as invalid.
+            result = _empty_job_result(
+                "create", source, ctx["output_dir"], skipped_invalid, ctx["warnings"]
+            )
+            _emit_job(result, args, job)
+            return errors.EXIT_SUCCESS
+
+        planned = plan_outputs(
+            valid,
+            source,
+            output_dir=ctx["output_dir"],
+            collision_policy=ctx["collision_policy"],
+            resolve_settings=ctx["resolver"],
+        )
+        if any(p.action == "collision" for p in planned):
+            result = _collision_result("create", planned, ctx["output_dir"], ctx["warnings"])
+            _emit_job(result, args, job)
+            return errors.EXIT_COLLISION
+
+        paths.ensure_directory(ctx["output_dir"])
+        created, failed, skipped = _run_conversions(
+            planned,
+            source,
+            ctx["cfg"],
+            ctx["tools"],
+            reporter,
+            continue_on_error=ctx["continue_on_error"],
+        )
+        skipped = skipped_invalid + skipped
+
+        status = _finalize_status(created, failed, 1)
+        result = _job_result(
+            "create", source, ctx["output_dir"], created, failed, skipped, ctx["warnings"], 1
+        )
+        result["status"] = status
+        _emit_job(result, args, job)
+        return _job_exit_code(status, created, failed)
+    finally:
+        job.cleanup()
 
 
 def _cmd_batch(args: argparse.Namespace) -> int:
-    ctx = _prepare_job(args, "batch")
-    source: SourceInfo = ctx["source"]
-    manifest: manifests.Manifest = ctx["manifest"]
-
-    valid, skipped_invalid = validate_and_filter(
-        manifest.clips, source.duration_ms, args.invalid_timestamp_policy
-    )
-    planned = plan_outputs(
-        valid,
-        source,
-        output_dir=ctx["output_dir"],
-        collision_policy=ctx["collision_policy"],
-        resolve_settings=ctx["resolver"],
-    )
-
-    if args.dry_run:
-        result = _dry_run_result(
-            "batch", source, planned, ctx["output_dir"], skipped_invalid, ctx["warnings"]
-        )
-        _emit(result, args.json)
-        return errors.EXIT_SUCCESS
-
-    if any(p.action == "collision" for p in planned):
-        result = _collision_result("batch", planned, ctx["output_dir"], ctx["warnings"])
-        _emit(result, args.json)
-        return errors.EXIT_COLLISION
-
-    paths.ensure_directory(ctx["output_dir"])
     reporter = ProgressReporter(enabled=not args.no_progress)
-    created, failed, skipped = _run_conversions(
-        planned,
-        source,
-        ctx["cfg"],
-        ctx["tools"],
-        reporter,
-        continue_on_error=ctx["continue_on_error"],
-    )
-    skipped = skipped_invalid + skipped
+    job = _JobCleanup()
+    try:
+        ctx = _prepare_job(args, "batch", reporter=reporter, job=job)
+        source: SourceInfo = ctx["source"]
+        manifest: manifests.Manifest = ctx["manifest"]
 
-    requested = len(manifest.clips)
-    status = _finalize_status(created, failed, requested)
-    result = _job_result(
-        "batch", source, ctx["output_dir"], created, failed, skipped, ctx["warnings"], requested
-    )
-    result["status"] = status
-    _emit(result, args.json)
-    return _job_exit_code(status, created, failed)
+        valid, skipped_invalid = validate_and_filter(
+            manifest.clips, source.duration_ms, args.invalid_timestamp_policy
+        )
+        planned = plan_outputs(
+            valid,
+            source,
+            output_dir=ctx["output_dir"],
+            collision_policy=ctx["collision_policy"],
+            resolve_settings=ctx["resolver"],
+        )
+
+        if args.dry_run:
+            result = _dry_run_result(
+                "batch", source, planned, ctx["output_dir"], skipped_invalid, ctx["warnings"]
+            )
+            _emit_job(result, args, job)
+            return errors.EXIT_SUCCESS
+
+        if any(p.action == "collision" for p in planned):
+            result = _collision_result("batch", planned, ctx["output_dir"], ctx["warnings"])
+            _emit_job(result, args, job)
+            return errors.EXIT_COLLISION
+
+        paths.ensure_directory(ctx["output_dir"])
+        created, failed, skipped = _run_conversions(
+            planned,
+            source,
+            ctx["cfg"],
+            ctx["tools"],
+            reporter,
+            continue_on_error=ctx["continue_on_error"],
+        )
+        skipped = skipped_invalid + skipped
+
+        requested = len(manifest.clips)
+        status = _finalize_status(created, failed, requested)
+        result = _job_result(
+            "batch", source, ctx["output_dir"], created, failed, skipped, ctx["warnings"], requested
+        )
+        result["status"] = status
+        _emit_job(result, args, job)
+        return _job_exit_code(status, created, failed)
+    finally:
+        job.cleanup()
 
 
 def _empty_job_result(
@@ -955,9 +1096,13 @@ def _cmd_validate_config(args: argparse.Namespace) -> int:
             "continueOnError": cfg.continue_on_error,
             "keepTemporaryFiles": cfg.keep_temporary_files,
             "allowOutsideProject": cfg.allow_outside_project,
+            "remoteSources": cfg.remote_sources,
+            "keepRemoteSource": cfg.keep_remote_source,
             "limits": {
                 "maxClipProcessingSeconds": cfg.max_clip_processing_seconds,
                 "maxTemporaryBytes": cfg.max_temporary_bytes,
+                "maxDownloadBytes": cfg.max_download_bytes,
+                "maxDownloadSeconds": cfg.max_download_seconds,
             },
         },
     }

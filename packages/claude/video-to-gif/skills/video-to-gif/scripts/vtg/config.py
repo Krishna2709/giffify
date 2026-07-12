@@ -28,9 +28,19 @@ _KNOWN_FIELDS = {
     "keepTemporaryFiles",
     "allowOutsideProject",
     "remoteSources",
+    "keepRemoteSource",
     "limits",
 }
-_KNOWN_LIMIT_FIELDS = {"maxClipProcessingSeconds", "maxTemporaryBytes"}
+_KNOWN_LIMIT_FIELDS = {
+    "maxClipProcessingSeconds",
+    "maxTemporaryBytes",
+    "maxDownloadBytes",
+    "maxDownloadSeconds",
+}
+
+# Permitted values for the remoteSources gate (spec FR-018 / section 9.5). In
+# v0.1.0 only "disabled" was accepted; v0.2.0 adds "ask" and "enabled".
+VALID_REMOTE_SOURCES = frozenset({"disabled", "ask", "enabled"})
 
 # Forbidden config content (section 9.4). Presence of these keys is an error.
 _FORBIDDEN_FIELDS = {
@@ -52,6 +62,8 @@ _FORBIDDEN_FIELDS = {
 
 DEFAULT_MAX_CLIP_SECONDS = 600
 DEFAULT_MAX_TEMP_BYTES = 2147483648
+DEFAULT_MAX_DOWNLOAD_BYTES = 2147483648  # 2 GiB (spec FR-021 / section 9.5)
+DEFAULT_MAX_DOWNLOAD_SECONDS = 900  # 15 minutes (spec FR-021 / section 9.5)
 
 
 @dataclass
@@ -65,8 +77,11 @@ class Config:
     keep_temporary_files: bool = False
     allow_outside_project: bool = False
     remote_sources: str = "disabled"
+    keep_remote_source: bool = False
     max_clip_processing_seconds: int = DEFAULT_MAX_CLIP_SECONDS
     max_temporary_bytes: int = DEFAULT_MAX_TEMP_BYTES
+    max_download_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES
+    max_download_seconds: int = DEFAULT_MAX_DOWNLOAD_SECONDS
     source_path: str | None = None  # where the config was loaded from
     warnings: list[str] = field(default_factory=list)
 
@@ -145,6 +160,7 @@ def validate_config_dict(data: Any, *, source_path: str | None = None) -> Config
         ("continueOnError", "continue_on_error"),
         ("keepTemporaryFiles", "keep_temporary_files"),
         ("allowOutsideProject", "allow_outside_project"),
+        ("keepRemoteSource", "keep_remote_source"),
     ):
         if bool_field in data:
             val = data[bool_field]
@@ -154,9 +170,10 @@ def validate_config_dict(data: Any, *, source_path: str | None = None) -> Config
 
     if "remoteSources" in data:
         rs = data["remoteSources"]
-        if rs not in ("disabled",):
+        if not isinstance(rs, str) or rs not in VALID_REMOTE_SOURCES:
             raise _config_error(
-                "remoteSources must be 'disabled' in version 0.1.0.", "remoteSources"
+                f"remoteSources must be one of {sorted(VALID_REMOTE_SOURCES)}.",
+                "remoteSources",
             )
         cfg.remote_sources = rs
 
@@ -183,6 +200,22 @@ def validate_config_dict(data: Any, *, source_path: str | None = None) -> Config
                     "limits.maxTemporaryBytes",
                 )
             cfg.max_temporary_bytes = v
+        if "maxDownloadBytes" in limits:
+            v = limits["maxDownloadBytes"]
+            if not isinstance(v, int) or isinstance(v, bool) or v <= 0:
+                raise _config_error(
+                    "limits.maxDownloadBytes must be a positive integer.",
+                    "limits.maxDownloadBytes",
+                )
+            cfg.max_download_bytes = v
+        if "maxDownloadSeconds" in limits:
+            v = limits["maxDownloadSeconds"]
+            if not isinstance(v, (int, float)) or isinstance(v, bool) or v <= 0:
+                raise _config_error(
+                    "limits.maxDownloadSeconds must be a positive number.",
+                    "limits.maxDownloadSeconds",
+                )
+            cfg.max_download_seconds = int(v)
 
     # Unknown top-level fields -> warnings (section 9.4).
     for key in data:

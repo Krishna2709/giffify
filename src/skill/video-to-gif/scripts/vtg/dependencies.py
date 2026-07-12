@@ -70,6 +70,23 @@ def _has_gif_encoder(ffmpeg: str) -> bool:
     return False
 
 
+def find_ytdlp() -> str | None:
+    """Locate the optional ``yt-dlp`` executable (never installs it, FR-022)."""
+    return find_executable("yt-dlp")
+
+
+def ytdlp_version(path: str) -> str | None:
+    """Return the yt-dlp version string, or None if it cannot be determined."""
+    try:
+        proc = _run([path, "--version"], timeout=10.0)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    version = (proc.stdout or "").strip().splitlines()[0].strip() if proc.stdout else ""
+    return version or None
+
+
 def _tempdir_writable() -> bool:
     try:
         with tempfile.NamedTemporaryFile(prefix="vtg-doctor-", delete=True) as fh:
@@ -174,6 +191,25 @@ def run_doctor(output_directory: str | None = None) -> dict[str, Any]:
         }
     )
 
+    # Optional yt-dlp adapter (FR-022, spec section 6.3). Its absence MUST NOT be
+    # a failure, so this check is always ok=True and never gates `healthy`; the
+    # presence/version is reported for the agent's information.
+    ytdlp_path = find_ytdlp()
+    ytdlp_ver = ytdlp_version(ytdlp_path) if ytdlp_path else None
+    checks.append(
+        {
+            "name": "ytdlp_adapter",
+            "ok": True,
+            "optional": True,
+            "detail": (
+                f"yt-dlp {ytdlp_ver} ({ytdlp_path})"
+                if ytdlp_path
+                else "not installed (optional; only needed for --remote-adapter ytdlp)"
+            ),
+            "remediation": None,
+        }
+    )
+
     if output_directory is not None:
         out_ok = _dir_writable(output_directory)
         checks.append(
@@ -191,6 +227,11 @@ def run_doctor(output_directory: str | None = None) -> dict[str, Any]:
         "checks": checks,
         "ffmpeg": ffmpeg,
         "ffprobe": ffprobe,
+        "ytdlp": {
+            "available": ytdlp_path is not None,
+            "path": ytdlp_path,
+            "version": ytdlp_ver,
+        },
         "installGuidance": None if (ffmpeg and ffprobe) else install_hint,
     }
 
@@ -218,3 +259,24 @@ def require_ffmpeg_tools() -> dict[str, str]:
     # Both are non-None here: any missing tool raised above.
     assert ffmpeg is not None and ffprobe is not None
     return {"ffmpeg": ffmpeg, "ffprobe": ffprobe}
+
+
+def require_ytdlp() -> str:
+    """Return the ``yt-dlp`` path or raise YTDLP_MISSING (exit 3, FR-022).
+
+    The adapter is never installed by the engine; the caller requested it via
+    ``--remote-adapter ytdlp`` but the executable was not detected.
+    """
+    path = find_ytdlp()
+    if path is None:
+        raise errors.EngineError(
+            errors.YTDLP_MISSING,
+            "The yt-dlp adapter was requested (--remote-adapter ytdlp) but yt-dlp "
+            "was not found on PATH.",
+            exit_code=errors.EXIT_DEPENDENCY_MISSING,
+            status=errors.STATUS_DEPENDENCY_MISSING,
+            stage="remote",
+            remediation="Install yt-dlp (e.g. 'pipx install yt-dlp') and re-run.",
+            details={"missing": ["yt-dlp"]},
+        )
+    return path

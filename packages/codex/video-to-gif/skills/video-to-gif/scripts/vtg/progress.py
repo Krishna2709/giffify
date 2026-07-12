@@ -33,6 +33,28 @@ class ProgressReporter:
     def stage_progress(self, clip_index: int, stage: str, percent: float) -> None:
         self.emit("stage_progress", clipIndex=clip_index, stage=stage, percent=round(percent, 1))
 
+    def download_progress(
+        self,
+        bytes_received: int,
+        total_bytes: int | None,
+        percent: float | None = None,
+    ) -> None:
+        """Emit a remote-download progress event (spec section 13.3, FR-023).
+
+        Uses stage ``"download"`` with ``bytesReceived`` and, when the total size
+        is known, ``totalBytes`` and ``percent``. ``totalBytes`` MAY be null and
+        ``percent`` is then omitted. Any URL echoed here MUST already be redacted
+        by the caller under SEC-015; this method never receives a URL.
+        """
+        fields: dict[str, Any] = {
+            "stage": "download",
+            "bytesReceived": bytes_received,
+            "totalBytes": total_bytes,
+        }
+        if percent is not None and total_bytes is not None:
+            fields["percent"] = round(percent, 1)
+        self.emit("stage_progress", **fields)
+
     def clip_completed(self, clip_index: int, path: str) -> None:
         self.emit("clip_completed", clipIndex=clip_index, path=path)
 

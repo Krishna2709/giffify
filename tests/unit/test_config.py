@@ -11,6 +11,8 @@ from vtg import errors
 from vtg.cli import _first
 from vtg.config import (
     DEFAULT_MAX_CLIP_SECONDS,
+    DEFAULT_MAX_DOWNLOAD_BYTES,
+    DEFAULT_MAX_DOWNLOAD_SECONDS,
     DEFAULT_MAX_TEMP_BYTES,
     Config,
     validate_config_dict,
@@ -92,6 +94,77 @@ class TestConfigValidation(unittest.TestCase):
         # agent resolves it, and the engine treats it as fail (never overwrites).
         cfg = validate_config_dict({"schemaVersion": 1, "collisionPolicy": "ask"})
         self.assertEqual(cfg.collision_policy, "ask")
+
+
+class TestRemoteConfig(unittest.TestCase):
+    """v0.2.0 remote source configuration (spec section 9.5, FR-018/FR-021)."""
+
+    def test_remote_defaults(self):
+        cfg = validate_config_dict({})
+        self.assertEqual(cfg.remote_sources, "disabled")
+        self.assertFalse(cfg.keep_remote_source)
+        self.assertEqual(cfg.max_download_bytes, DEFAULT_MAX_DOWNLOAD_BYTES)
+        self.assertEqual(cfg.max_download_seconds, DEFAULT_MAX_DOWNLOAD_SECONDS)
+        # The documented defaults (spec FR-021).
+        self.assertEqual(cfg.max_download_bytes, 2147483648)
+        self.assertEqual(cfg.max_download_seconds, 900)
+
+    def test_remote_sources_accepts_all_three_values(self):
+        for value in ("disabled", "ask", "enabled"):
+            with self.subTest(value=value):
+                cfg = validate_config_dict({"schemaVersion": 1, "remoteSources": value})
+                self.assertEqual(cfg.remote_sources, value)
+
+    def test_remote_sources_rejects_unknown(self):
+        for bad in ("on", "true", "", 1, None):
+            with self.subTest(bad=bad):
+                with self.assertRaises(errors.EngineError) as ctx:
+                    validate_config_dict({"remoteSources": bad})
+                self.assertEqual(ctx.exception.field, "remoteSources")
+                self.assertEqual(ctx.exception.exit_code, errors.EXIT_INVALID_USAGE)
+
+    def test_keep_remote_source_must_be_bool(self):
+        cfg = validate_config_dict({"schemaVersion": 1, "keepRemoteSource": True})
+        self.assertTrue(cfg.keep_remote_source)
+        with self.assertRaises(errors.EngineError) as ctx:
+            validate_config_dict({"keepRemoteSource": "yes"})
+        self.assertEqual(ctx.exception.field, "keepRemoteSource")
+
+    def test_download_limits_validated(self):
+        cfg = validate_config_dict(
+            {"schemaVersion": 1, "limits": {"maxDownloadBytes": 5000, "maxDownloadSeconds": 30}}
+        )
+        self.assertEqual(cfg.max_download_bytes, 5000)
+        self.assertEqual(cfg.max_download_seconds, 30)
+
+    def test_download_limits_field_paths(self):
+        cases = [
+            ({"limits": {"maxDownloadBytes": 0}}, "limits.maxDownloadBytes"),
+            ({"limits": {"maxDownloadBytes": -1}}, "limits.maxDownloadBytes"),
+            ({"limits": {"maxDownloadBytes": 1.5}}, "limits.maxDownloadBytes"),
+            ({"limits": {"maxDownloadSeconds": 0}}, "limits.maxDownloadSeconds"),
+            ({"limits": {"maxDownloadSeconds": -3}}, "limits.maxDownloadSeconds"),
+        ]
+        for data, field in cases:
+            with self.subTest(field=field, data=data):
+                with self.assertRaises(errors.EngineError) as ctx:
+                    validate_config_dict(data)
+                self.assertEqual(ctx.exception.field, field)
+
+    def test_omitting_download_limits_uses_defaults(self):
+        # A config that omits them MUST behave as though the defaults were given.
+        cfg = validate_config_dict({"schemaVersion": 1, "limits": {"maxTemporaryBytes": 1000}})
+        self.assertEqual(cfg.max_download_bytes, DEFAULT_MAX_DOWNLOAD_BYTES)
+        self.assertEqual(cfg.max_download_seconds, DEFAULT_MAX_DOWNLOAD_SECONDS)
+
+    def test_keep_remote_source_precedence_cli_over_config(self):
+        # The engine resolves keep = (--keep-remote-source flag) OR (config value).
+        def resolve_keep(flag: bool, cfg_value: bool) -> bool:
+            return bool(flag) or cfg_value
+
+        self.assertTrue(resolve_keep(True, Config(keep_remote_source=False).keep_remote_source))
+        self.assertTrue(resolve_keep(False, Config(keep_remote_source=True).keep_remote_source))
+        self.assertFalse(resolve_keep(False, Config(keep_remote_source=False).keep_remote_source))
 
 
 class TestPrecedence(unittest.TestCase):

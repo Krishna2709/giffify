@@ -354,7 +354,7 @@ Proposed metadata:
 name: video-to-gif
 description: Convert explicit timestamp ranges from local video files into one or more optimized animated GIFs. Use when a user asks to create a GIF from a video, extract timestamped clips as GIFs, batch-generate GIFs from CSV or JSON timestamp manifests, or convert a remote video URL when remote sources are enabled.
 license: LICENSE
-compatibility: Requires Python 3.10+, ffmpeg, and ffprobe. Supports macOS, Windows, and Linux. Version 0.2 processes local video files by default and can optionally acquire remote HTTP or HTTPS source URLs when remote sources are explicitly enabled.
+compatibility: Requires Python 3.10+, ffmpeg, and ffprobe. Supports macOS, Windows, and Linux. Version 0.2.0 processes local video files by default and can optionally acquire remote HTTP or HTTPS source URLs when remote sources are explicitly enabled.
 metadata:
   product-version: "0.2.0"
   specification: "VTG-TS-001"
@@ -991,6 +991,8 @@ Additional flags:
 * --allow-remote: enable remote acquisition for a single invocation, overriding a disabled or ask configuration (FR-018).
 * --keep-remote-source: retain the downloaded source after the job and report its path (FR-020).
 * --remote-adapter ytdlp: acquire a video-page URL through the optional yt-dlp adapter (FR-022).
+* --allow-insecure-http: permit an http URL with an unencrypted-transfer warning (SEC-013).
+* --allow-remote-address <address>: approve one otherwise-blocked private-network or loopback address for this invocation (SEC-014).
 
 For inspect on a URL, the engine MUST acquire the source under FR-020 before running ffprobe, because inspection is network-isolated under SEC-010.
 
@@ -1096,10 +1098,10 @@ Code	Meaning
 2	Invalid CLI usage or malformed schema
 3	Required dependency missing
 4	Input not found or inaccessible
-5	Invalid or unsupported media
+5	Invalid or unsupported media or source type
 6	Invalid timestamp or clip definition
 7	Output collision
-8	Filesystem permission or project-boundary violation
+8	Filesystem, project-boundary, or network-policy violation
 9	FFmpeg conversion failure
 10	Operation cancelled
 11	Partial batch success
@@ -1343,7 +1345,7 @@ SEC-013: URL scheme allowlist
 Remote source URLs MUST be restricted to an allowlist of schemes.
 
 * https MUST be permitted.
-* http MAY be permitted only with an explicit warning that the transfer is unencrypted.
+* http MAY be permitted only through the explicit --allow-insecure-http flag, and the engine MUST emit a warning that the transfer is unencrypted. Without the flag, http MUST be rejected as UNSUPPORTED_URL_SCHEME.
 * file and all other schemes MUST be rejected with error code UNSUPPORTED_URL_SCHEME and exit code 5, and MUST NOT be fetched or opened.
 
 The scheme allowlist MUST be enforced before any network connection is attempted, and MUST be re-enforced on every redirect target.
@@ -1352,7 +1354,7 @@ SEC-014: Private-network and SSRF protection
 
 The acquisition component MUST guard against server-side request forgery.
 
-Requests to the following MUST be blocked unless the user explicitly approves the specific address, with error code PRIVATE_NETWORK_BLOCKED and exit code 8:
+Requests to the following MUST be blocked unless the user explicitly approves the specific address through the --allow-remote-address flag, with error code PRIVATE_NETWORK_BLOCKED and exit code 8:
 
 * Loopback addresses.
 * Private-network ranges.
