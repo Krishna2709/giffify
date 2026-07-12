@@ -9,11 +9,11 @@ e175378d5437ea5ff4a766e3481602ad046e1af6a4fe3dc72b97ebba16718f43  skills/video-t
 c93079e523f31354a1677a43c74b6423aa21d03ef4c503de9e686ce7f3872504  skills/video-to-gif/references/troubleshooting.md
 56c735bd5464b84f4fa395284f0be02c1217f109a18075896b23214c538b2e95  skills/video-to-gif/scripts/video_to_gif.py
 3c58d2a7098fc67dddb09091b25aaa083d7dfa2a6a177d0de1cd3f9c89ad5254  skills/video-to-gif/scripts/vtg/__init__.py
-14722cbc15ea2281f7d25a21cb85a9ebeba85c60341773f100d1e6f9da186c60  skills/video-to-gif/scripts/vtg/cli.py
+0a4cdf2a9babdaad371cadd88565fa09ab86e67c4a309527d8db1de821e5d6d1  skills/video-to-gif/scripts/vtg/cli.py
 6926824c1fd3b70d4847bf8b21f11c24291ad2ddb15582602632ad27c36fe4b0  skills/video-to-gif/scripts/vtg/config.py
 02360d4efa39a6291d01cd9c748a1dae4cbfbc7bd07fcb44cfdf9cc746466d5a  skills/video-to-gif/scripts/vtg/dependencies.py
 4afb96c07755af694796ec8c84d3d9e5e6dfa6da954eddaf3d7c99375a2d82e5  skills/video-to-gif/scripts/vtg/errors.py
-0c66354881f87c79eefc1f03f1f1f72db304bd5caa9cd943c1aeb4e360cdfc2c  skills/video-to-gif/scripts/vtg/ffmpeg.py
+ae8d37aa96d98965db569171d4258c97d68d25402c0f94b28ffb34e6aecdfdbd  skills/video-to-gif/scripts/vtg/ffmpeg.py
 fc96b710d7f65aed803022e3e79780150d8fe292379e30544c69cfa7e283ad3d  skills/video-to-gif/scripts/vtg/inspect.py
 cc98de734af9e8e8f0b48c603988285388651b923c350d3067fba4be1c2840d0  skills/video-to-gif/scripts/vtg/manifests.py
 9de59c5a926a4833d7f9eb981165d1d9189947c2727e972b191ed82cbb2d0f77  skills/video-to-gif/scripts/vtg/models.py

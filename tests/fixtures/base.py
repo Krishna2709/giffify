@@ -30,6 +30,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from collections.abc import Callable
 from typing import Any
@@ -69,6 +70,26 @@ def find_tool(name: str) -> str | None:
 
 FFMPEG = find_tool("ffmpeg")
 FFPROBE = find_tool("ffprobe")
+
+
+def rmtree_with_retry(path: str, *, retry_seconds: float = 2.0, interval: float = 0.05) -> None:
+    """Remove a directory tree the fixture created, tolerating transient locks.
+
+    On Windows a subprocess the engine launched (ffmpeg reading the source, or
+    writing into ``output/``) may hold a handle for a few milliseconds after it
+    is terminated and reaped, and antivirus can hold brief locks; a single
+    ``shutil.rmtree`` then leaves the fixture's own temp dir behind. Retrying in
+    short sleeps until it is gone makes teardown deterministic. This guards only
+    the fixture's own directories -- the engine-leak assertions
+    (``_engine_temp_dirs``/``temp_gif_leftovers``) remain strict. No-op-cost on
+    POSIX, where the first attempt succeeds.
+    """
+    deadline = time.monotonic() + retry_seconds
+    while True:
+        shutil.rmtree(path, ignore_errors=True)
+        if not os.path.exists(path) or time.monotonic() >= deadline:
+            return
+        time.sleep(interval)
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +178,7 @@ class EngineTestCase(unittest.TestCase):
     @classmethod
     def tearDownClass(cls) -> None:
         if cls.media_dir:
-            shutil.rmtree(cls.media_dir, ignore_errors=True)
+            rmtree_with_retry(cls.media_dir)
             # The shared media dir must be outside the repo and fully removed.
             assert not os.path.exists(cls.media_dir), "class media dir not cleaned"
 
@@ -180,7 +201,7 @@ class EngineTestCase(unittest.TestCase):
         self._temp_snapshot = self._engine_temp_dirs()
 
     def tearDown(self) -> None:
-        shutil.rmtree(self.project, ignore_errors=True)
+        rmtree_with_retry(self.project)
         self.assertFalse(os.path.exists(self.project), "project temp dir not cleaned")
         leaked = self._engine_temp_dirs() - self._temp_snapshot
         self.assertEqual(
@@ -250,24 +271,39 @@ class EngineTestCase(unittest.TestCase):
         trigger: Callable[[dict[str, Any]], bool],
         *,
         cwd: str | None = None,
-        send_signal: int = signal.SIGINT,
+        send_signal: int | None = None,
         timeout: int = 180,
     ) -> EngineResult:
         """Run the engine, and when a stderr progress event satisfies ``trigger``,
-        deliver ``send_signal`` to the engine process. Used for cancellation tests.
+        deliver a cancellation signal to the engine process. Used for cancellation
+        tests.
+
+        The signal is platform-appropriate: POSIX uses SIGINT; Windows cannot
+        deliver SIGINT to a subprocess (``send_signal`` raises ``ValueError:
+        Unsupported signal: 2``), so the engine is launched in its own process
+        group (``CREATE_NEW_PROCESS_GROUP``) and cancelled with
+        ``CTRL_BREAK_EVENT``, which the engine receives as SIGBREAK (spec §16).
+        Cancellation semantics are identical, so callers' assertions are unchanged.
+        Pass ``send_signal`` to override the default for a specific platform test.
         """
         cwd = cwd or self.project
         argv = [sys.executable, ENTRY] + [str(a) for a in args]
         if "--json" not in argv:
             argv.append("--json")
-        proc = subprocess.Popen(
-            argv,
-            cwd=cwd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        popen_kwargs: dict[str, Any] = {
+            "cwd": cwd,
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+        }
+        if sys.platform == "win32":
+            # Own process group so CTRL_BREAK_EVENT reaches only the engine.
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            cancel_signal = signal.CTRL_BREAK_EVENT if send_signal is None else send_signal
+        else:
+            cancel_signal = signal.SIGINT if send_signal is None else send_signal
+        proc = subprocess.Popen(argv, **popen_kwargs)
         stdout_chunks: list[str] = []
 
         def _drain_stdout() -> None:
@@ -292,7 +328,7 @@ class EngineTestCase(unittest.TestCase):
             except json.JSONDecodeError:
                 continue
             if isinstance(ev, dict) and trigger(ev):
-                proc.send_signal(send_signal)
+                proc.send_signal(cancel_signal)
                 fired = True
         proc.wait(timeout=timeout)
         t.join(timeout=timeout)

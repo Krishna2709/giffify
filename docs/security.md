@@ -171,6 +171,12 @@ clips completed (spec §16). Temporary files use unpredictable names in an
 appropriate temporary directory and are removed after success or failure unless
 `keepTemporaryFiles` is set for debugging.
 
+On Windows the engine registers a `SIGBREAK` handler (in addition to `SIGINT`/
+`SIGTERM`) so console cancellation is honored, and every cleanup path waits for
+the terminated FFmpeg process to exit before deleting temp artifacts with a
+bounded retry — Windows does not release a killed process's file handles
+synchronously, so a plain unlink would otherwise fail and leak partial output.
+
 ## Privacy
 
 Version 0.1.0 processes videos locally and uploads nothing — no source videos,

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -35,6 +36,16 @@ _DEFAULT_DITHER = "sierra2_4a"
 
 _GRACE_SECONDS = 5.0
 _POLL_INTERVAL = 0.2
+
+# Bounded retry window for deleting temp artifacts after an FFmpeg process is
+# terminated. On Windows the killed process's file handles are not released
+# synchronously with proc.wait(), and antivirus scanners can hold brief locks,
+# so os.remove/shutil.rmtree on the still-locked path raises PermissionError
+# where POSIX would have unlinked the open file immediately. Retrying for a short
+# bounded window absorbs that lag; on POSIX the first attempt succeeds, so the
+# loop is a no-op.
+_CLEANUP_RETRY_SECONDS = 2.0
+_CLEANUP_RETRY_INTERVAL = 0.05
 
 
 def resolve_effective_settings(
@@ -235,6 +246,38 @@ def _dir_size(paths: list[str]) -> int:
     return total
 
 
+def _remove_path(path: str, *, deadline: float) -> None:
+    """Delete a file or directory tree, retrying on transient lock errors.
+
+    Deletes ``path`` (a file, symlink, or directory tree) and returns once it is
+    gone or already absent. On ``PermissionError``/``OSError`` -- which Windows
+    raises while a just-terminated FFmpeg process still holds the handle, or an
+    antivirus scanner holds a transient lock -- it retries in short sleeps until
+    ``deadline`` (a ``time.monotonic()`` value), then gives up best-effort so
+    cleanup never blocks or raises. On POSIX the first attempt succeeds.
+    """
+    while True:
+        try:
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path)
+            elif os.path.lexists(path):
+                os.remove(path)
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            if time.monotonic() >= deadline:
+                return  # best-effort: matches prior suppress-on-error semantics
+            time.sleep(_CLEANUP_RETRY_INTERVAL)
+
+
+def _remove_paths(paths: list[str]) -> None:
+    """Remove several temp artifacts, sharing one bounded retry deadline."""
+    deadline = time.monotonic() + _CLEANUP_RETRY_SECONDS
+    for path in paths:
+        _remove_path(path, deadline=deadline)
+
+
 def run_guarded(
     cmd: list[str],
     *,
@@ -390,16 +433,14 @@ def convert_clip(
     temp_paths = [temp_dir, temp_out]
 
     def _cleanup() -> None:
+        # Cleanup runs only after run_guarded has terminated AND waited for the
+        # FFmpeg process (breach/cancel via _terminate_group, failure via
+        # communicate()), so the OS has begun releasing its file handles. The
+        # in-place temp GIF and the palette temp dir are then removed with a
+        # bounded retry to absorb Windows' non-synchronous handle release.
         if keep_temporary_files:
             return
-        with contextlib.suppress(OSError):
-            if os.path.exists(temp_out):
-                os.remove(temp_out)
-        for name in ("palette.png",):
-            with contextlib.suppress(OSError):
-                os.remove(os.path.join(temp_dir, name))
-        with contextlib.suppress(OSError):
-            os.rmdir(temp_dir)
+        _remove_paths([temp_out, temp_dir])
 
     try:
         reporter.stage_progress(clip_index, "palette", 0.0)
@@ -437,12 +478,10 @@ def convert_clip(
         _cleanup()
         raise
     else:
-        # Success: remove palette/temp dir (temp_out already moved).
+        # Success: remove the palette temp dir (temp_out already moved into
+        # place). The same bounded retry keeps this robust on Windows.
         if not keep_temporary_files:
-            with contextlib.suppress(OSError):
-                os.remove(palette_path)
-            with contextlib.suppress(OSError):
-                os.rmdir(temp_dir)
+            _remove_paths([temp_dir])
 
     return ConversionResult(
         path=dest_path,
