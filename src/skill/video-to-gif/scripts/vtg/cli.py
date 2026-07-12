@@ -1212,9 +1212,12 @@ def main(argv: list[str] | None = None) -> int:
         _emit(_cancelled_result(args.command, cancelled, []), json_mode)
         return errors.EXIT_CANCELLED
     except Exception as exc:
+        # FIX m2: an unexpected exception on the remote path could carry a raw
+        # source URL in its message; redact any http(s) URL substring (SEC-015)
+        # before surfacing it. A no-op for the common non-URL messages.
         engine_exc = errors.EngineError(
             errors.INTERNAL_ERROR,
-            f"Internal engine error: {exc}",
+            remote_mod.redact_message_urls(f"Internal engine error: {exc}"),
             exit_code=errors.EXIT_INTERNAL,
             status=errors.STATUS_FAILED,
         )

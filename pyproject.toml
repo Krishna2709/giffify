@@ -16,7 +16,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "video-to-gif"
-version = "0.1.0"
+version = "0.2.0"
 description = "Convert explicit timestamp ranges from local video files into optimized animated GIFs. Portable Agent Skill for Claude Code and Codex."
 readme = "README.md"
 requires-python = ">=3.10"

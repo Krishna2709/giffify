@@ -640,7 +640,7 @@ class TestYtdlp(_RemoteTestBase):
             self.assertRaises(errors.EngineError) as ctx,
         ):
             remote.acquire_remote_source(
-                "https://videos.example.com/watch?v=abc",
+                "https://93.184.216.34/watch?v=abc",
                 adapter="ytdlp",
                 max_download_bytes=1000,
                 max_download_seconds=5,
@@ -663,7 +663,7 @@ class TestYtdlp(_RemoteTestBase):
             mock.patch.object(dependencies, "require_ytdlp", return_value="/usr/bin/yt-dlp"),
             mock.patch.object(remote.subprocess, "run", side_effect=fake_run),
         ):
-            result = self._acquire_ytdlp("https://videos.example.com/watch?v=abc")
+            result = self._acquire_ytdlp("https://93.184.216.34/watch?v=abc")
         self.assertEqual(result.adapter, "ytdlp")
         self.assertEqual(result.bytes_downloaded, len(b"YTDLP-DOWNLOADED-MEDIA"))
         self.assertTrue(os.path.isfile(result.local_path))
@@ -678,7 +678,7 @@ class TestYtdlp(_RemoteTestBase):
             self.assertRaises(errors.EngineError) as ctx,
         ):
             remote.acquire_remote_source(
-                "https://videos.example.com/watch?v=abc",
+                "https://93.184.216.34/watch?v=abc",
                 adapter="ytdlp",
                 max_download_bytes=1000000,
                 max_download_seconds=5,

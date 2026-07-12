@@ -188,11 +188,14 @@ class TestAcceptanceRemote(RemoteEngineTestCase):
         via VTG_* overrides), so it holds regardless of the host. When the host
         has yt-dlp installed, the present-and-acquires clause is skipped."""
         lis = self.listener()
+        # https scheme + approved loopback so the C1 pre-checks (scheme allowlist
+        # and SSRF host validation) pass and the flow reaches the YTDLP_MISSING
+        # detection; those pre-checks now run BEFORE the missing-binary check.
         res = self.run_engine(
             [
                 "create",
                 "--input",
-                lis.url("/watch"),
+                lis.url("/watch", scheme="https"),
                 "--start",
                 "0",
                 "--end",

@@ -124,6 +124,20 @@ are enabled or approved (FR-018); by default no network access occurs.
   approved. The component resolves the host, checks the resolved address against
   the block list, connects to that address, and re-evaluates on every redirect
   to resist DNS rebinding.
+- **Scope of the SEC-013/SEC-014 guarantees — direct path vs. yt-dlp adapter.**
+  The guarantees above apply in full to the **built-in direct-download path**,
+  which performs its own resolution, per-address validation, and connection
+  pinning. The optional **yt-dlp adapter** (`--remote-adapter ytdlp`) performs its
+  own network access — DNS resolution, connection, and redirect-following — that
+  the engine validates only **best-effort**: before launching yt-dlp the engine
+  applies the same scheme allowlist, URL DRM-marker check, and an SSRF host
+  resolution/validation, so obvious `file://`, bad-scheme, DRM, and internal-host
+  cases are refused up front with no acquisition. But the engine **cannot pin**
+  yt-dlp's connections. **Residual risk (accepted, per SEC-014):** a TOCTOU / DNS
+  rebinding change after the pre-check, or a redirect that yt-dlp follows to a
+  private address, is **not guaranteed** to be blocked. The yt-dlp path therefore
+  does **not** carry the direct path's connection-pinning guarantee. Prefer the
+  direct path for untrusted inputs.
 - **SEC-015 — Credential and token redaction.** Any source URL echoed in logs,
   errors, warnings, progress events, or structured results is reduced to scheme,
   host, and path; query strings (including signed-URL tokens) and userinfo are

@@ -63,9 +63,17 @@ guarantees:
   `--allow-remote`). With the default configuration nothing is fetched.
 - **Only after your approval.** When enabled with `ask` — or when overriding the
   default for a single run — the agent asks before any download.
-- **Only the source you specify.** Network access is limited to downloading the
-  exact URL you provide, from the host in that URL. Requests to private-network,
-  loopback, and cloud-metadata addresses are blocked. Nothing else is contacted.
+- **Only the source you specify.** For a direct `http`/`https` URL, network
+  access is limited to downloading the exact URL you provide, from the host in
+  that URL. Requests to private-network, loopback, and cloud-metadata addresses
+  are blocked. Nothing else is contacted.
+  - **yt-dlp adapter caveat.** If you opt into the optional `yt-dlp` adapter
+    (`--remote-adapter ytdlp`) for a video-page URL, that adapter resolves and
+    connects on its own and may contact the **video platform's own hosts and
+    CDNs** (not only the host in the URL you typed) in order to fetch the media.
+    It is still download-only — nothing about you or your files is uploaded — but
+    the set of hosts contacted is determined by yt-dlp and the platform, and the
+    engine validates it only best-effort (it cannot pin those connections).
 - **Download-only.** The skill only receives data; it never uploads your source,
   GIFs, frames, metadata, or filenames. There is no telemetry.
 - **Deleted after use.** A downloaded source is stored in a secure temporary

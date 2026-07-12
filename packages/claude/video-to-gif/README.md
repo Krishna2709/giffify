@@ -3,7 +3,7 @@
 Generate optimized animated GIFs from explicit video timestamp ranges. This
 package wraps the portable `video-to-gif` Agent Skill for Claude Code.
 
-- Version: 0.1.0
+- Version: 0.2.0
 - Author: Krishna2709 (https://github.com/Krishna2709)
 - License: MIT
 - Source repository: https://github.com/Krishna2709/giffify
@@ -11,8 +11,9 @@ package wraps the portable `video-to-gif` Agent Skill for Claude Code.
   (`pip install ffmpeg` is NOT FFmpeg)
 
 The skill itself lives under `skills/video-to-gif/` (SKILL.md plus the
-deterministic Python engine, references, and JSON schemas). Version 0.1.0
-processes local video files only and performs no network access; see
+deterministic Python engine, references, and JSON schemas). Conversion is local
+by default; version 0.2.0 adds opt-in, download-only remote source acquisition
+that is disabled by default and gated by explicit enablement/approval. See
 `skills/video-to-gif/references/` and the repository's SECURITY.md for the
 security model.
 

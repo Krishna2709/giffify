@@ -1,5 +1,5 @@
-9e79ffcef5c28b58f0582cc89caa9cd4e9d11c78b008dca61b7088aa25262dd9  .codex-plugin/plugin.json
-5f09cbdaa831f65b4ae1709fe1a183c4fceed92a431b24610aaabc2a6a63d8ab  README.md
+8f36e39b1051dbcc671c08187f2d1636bddbeaf1dce51f92b1cf385af7c8dcda  .codex-plugin/plugin.json
+64d9c6e346195a5c68cb749044e46629ea82f88b507bae46af66171cda0c4d97  README.md
 e04fba5d06b7738c31a18644c601b62db944bbb6a6d3659ed9048b07d23caf55  skills/video-to-gif/SKILL.md
 af4b88fcfc824321517400b55152ea6fd6b96743238bd549e6ef96eea03328a0  skills/video-to-gif/assets/config.schema.json
 54e976748c86e38c09914d2038a1c9961baf6659fea48bca28ec378c4189d253  skills/video-to-gif/assets/manifest.schema.json
@@ -7,12 +7,12 @@ d9cb23465b71935eb880692e43c2e965d4da1f38642763e586dcc8e48bc92e33  skills/video-t
 56410374fb54097b088bc719d23f27e6038e96608b5617d320d137bb74d79bb7  skills/video-to-gif/references/input-formats.md
 5d6f4938d7a57ae794041276a131562e52e069d7a7c8e6b25fc05855efc0d0d4  skills/video-to-gif/references/installation.md
 41da3df02c8c18b6a5a77411c1e6dea64cad8490eddd1978afc16763952bb9ef  skills/video-to-gif/references/quality-profiles.md
-f54d5cb5683a4c25bd88d7615289ea6873938c701ab94405655bb403d0459178  skills/video-to-gif/references/remote-sources.md
+f4f8892c9c54c54c39faa15570292a74935d0996ed1bda62fe946dc788b37044  skills/video-to-gif/references/remote-sources.md
 61a294cc7f9835bc14a16ae27ffa8888617b710184e3061870a4f62a45f32246  skills/video-to-gif/references/troubleshooting.md
 56c735bd5464b84f4fa395284f0be02c1217f109a18075896b23214c538b2e95  skills/video-to-gif/scripts/video_to_gif.py
-3c58d2a7098fc67dddb09091b25aaa083d7dfa2a6a177d0de1cd3f9c89ad5254  skills/video-to-gif/scripts/vtg/__init__.py
+5204a3373da9454030b4cd58f915c3a3b6c49f5183896c58399e7b37f7120da7  skills/video-to-gif/scripts/vtg/__init__.py
 f79d1960400748c314d9f0ae3c9918e487994508825a08a40577c872e3edbe5f  skills/video-to-gif/scripts/vtg/cleanup.py
-d2676871d585ebdda2a5b67d34185eba0288ba693b91cd0b15177ab617ca81ae  skills/video-to-gif/scripts/vtg/cli.py
+0461c1c86adf59cea4172bf8cc0dc237ae0a8c5dcf3901efa675fee2134e9541  skills/video-to-gif/scripts/vtg/cli.py
 1ca1b7b2a5f2d90c272e4a894ac9e101290098145dfe059948af7217976fd23e  skills/video-to-gif/scripts/vtg/config.py
 f715dcf073eb4a9e7bc5b03f3f1c0387c51daa20982255dfeb26531cdd47ac8f  skills/video-to-gif/scripts/vtg/dependencies.py
 ce491b8d4dacdb2a8db0ead867bb48e00a3019deadfffb5d4708db36262eea63  skills/video-to-gif/scripts/vtg/errors.py
@@ -23,5 +23,5 @@ cc98de734af9e8e8f0b48c603988285388651b923c350d3067fba4be1c2840d0  skills/video-t
 66942f936fa5b9cc8f5eee232877a008fa55e7ad39add0bdd1e1e546064b3736  skills/video-to-gif/scripts/vtg/naming.py
 03a3269138c61e8f5480df277bf75697a60ad37a0a130352ca0fd020395a0374  skills/video-to-gif/scripts/vtg/paths.py
 ddb80d2a2a860f50c1fef8648cd87f169628cdd883dfa0d3050eb45143006c4c  skills/video-to-gif/scripts/vtg/progress.py
-1893a55bc2edbfc6d88263560bfcab7c77451cd4c740f49c79e376b5a64266df  skills/video-to-gif/scripts/vtg/remote.py
+29f44c1171a82411b471ede2475d0af612b481819ffc7ea202e9f6e2d061146e  skills/video-to-gif/scripts/vtg/remote.py
 6f31dd424f7c3007a4fe35188843ada73372da49600c4259e9999b1fbc20f6b0  skills/video-to-gif/scripts/vtg/timestamps.py

@@ -14,14 +14,22 @@ server that drips and then holds the connection for 60 s), never by racing real
 transfer speeds.
 """
 
+import contextlib
+import io
 import json
 import os
 import sys
 import unittest
 from typing import ClassVar
+from unittest import mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from fixtures.media_server import HOSTILE_M3U8, LOOPBACK, RemoteEngineTestCase
+
+# fixtures.base (imported transitively above) puts the engine scripts dir on
+# sys.path, so the in-process redaction test can import the CLI module directly.
+from vtg import cli as vtg_cli
+from vtg import errors as vtg_errors
 
 # A signed-URL-style token + embedded credentials that must appear NOWHERE in any
 # engine output (SEC-015). They are transmitted to the origin but never echoed.
@@ -36,12 +44,20 @@ class TestRemoteSecurity(RemoteEngineTestCase):
     def generate_media(cls) -> None:
         cls.video_bytes = cls.make_media_bytes(size="320x240", fps=15, duration=2.0)
 
-    def _create(self, url: str, *flags: str, cfg: dict | None = None, timeout: int = 60):
+    def _create(
+        self,
+        url: str,
+        *flags: str,
+        cfg: dict | None = None,
+        timeout: int = 60,
+        env: dict | None = None,
+    ):
         if cfg is not None:
             self.write_config(**cfg)
         return self.run_engine(
             ["create", "--input", url, "--start", "0", "--end", "1", "--profile", "small", *flags],
             timeout=timeout,
+            env=env,
         )
 
     # -- disabled by default (FR-018) -------------------------------------
@@ -243,6 +259,69 @@ class TestRemoteSecurity(RemoteEngineTestCase):
         self.assert_exit(res, 5)
         self.assert_error_code(res, "DRM_PROTECTED")
         self.assert_no_remote_temp()
+
+    # -- yt-dlp adapter pre-checks (SEC-013/SEC-014, FIX C1) --------------
+    def test_ytdlp_adapter_rejects_file_scheme_before_spawn(self):
+        # The yt-dlp adapter now runs the SEC-013 scheme allowlist BEFORE launching
+        # yt-dlp: file:// is rejected as UNSUPPORTED_URL_SCHEME / exit 5 and never
+        # opened. Running with yt-dlp stripped from PATH proves the scheme check
+        # precedes the YTDLP_MISSING detection (otherwise this would be exit 3).
+        res = self._create(
+            "file:///etc/hostname",
+            "--allow-remote",
+            "--remote-adapter",
+            "ytdlp",
+            env=self.env_without_ytdlp(),
+        )
+        self.assert_exit(res, 5)
+        self.assert_error_code(res, "UNSUPPORTED_URL_SCHEME")
+        self.assertEqual(self.list_output(), [])
+        self.assert_no_remote_temp()
+
+    def test_ytdlp_adapter_blocks_private_host_before_spawn(self):
+        # A loopback host WITHOUT --allow-remote-address is blocked by the SEC-014
+        # SSRF pre-check with PRIVATE_NETWORK_BLOCKED / exit 8 BEFORE any yt-dlp
+        # spawn. The bare listener must see ZERO connections, and yt-dlp is stripped
+        # from PATH so exit 8 (not YTDLP_MISSING/3) proves the SSRF check runs first
+        # regardless of yt-dlp presence. https keeps the scheme check from firing.
+        lis = self.listener()
+        res = self._create(
+            lis.url("/watch", scheme="https"),
+            "--allow-remote",
+            "--remote-adapter",
+            "ytdlp",
+            env=self.env_without_ytdlp(),
+        )
+        self.assert_exit(res, 8)
+        self.assert_error_code(res, "PRIVATE_NETWORK_BLOCKED")
+        self.assertFalse(lis.connected.is_set(), "yt-dlp adapter connected to a blocked host")
+        self.assertEqual(self.list_output(), [])
+        self.assert_no_remote_temp()
+
+    # -- INTERNAL_ERROR URL redaction (SEC-015, FIX m2) -------------------
+    def test_internal_error_redacts_signed_url(self):
+        # A raw signed URL riding along in an unexpected exception must be redacted
+        # by the INTERNAL_ERROR sink: scheme/host/path survive, the token does not.
+        # Driven in-process by forcing a handler to raise with a URL in its message.
+        signed = f"https://cdn.example.com/v.mp4?X-Token={SECRET_TOKEN}&Signature=deadbeef"
+
+        def boom(_args: object) -> int:
+            raise RuntimeError(f"boom while fetching {signed}")
+
+        buf = io.StringIO()
+        with (
+            mock.patch.dict(vtg_cli._HANDLERS, {"doctor": boom}),
+            contextlib.redirect_stdout(buf),
+        ):
+            code = vtg_cli.main(["doctor", "--json"])
+        out = buf.getvalue()
+        self.assertEqual(code, vtg_errors.EXIT_INTERNAL)
+        self.assertNotIn(SECRET_TOKEN, out, "signed token leaked through INTERNAL_ERROR")
+        self.assertNotIn("Signature=deadbeef", out)
+        result = json.loads(out.strip().splitlines()[-1])
+        self.assertEqual(result["error"]["code"], "INTERNAL_ERROR")
+        # Scheme, host, and path are retained (redaction, not obliteration).
+        self.assertIn("https://cdn.example.com/v.mp4", result["error"]["message"])
 
     # -- conversion isolation (SEC-012) -----------------------------------
     def test_downloaded_playlist_cannot_trigger_network(self):

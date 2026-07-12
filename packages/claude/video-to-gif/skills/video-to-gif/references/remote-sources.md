@@ -46,6 +46,8 @@ A URL may be supplied wherever a source is accepted, including the `--input` arg
 
 The scheme allowlist and the private-network block list are enforced before any connection and re-enforced on every redirect target. To resist DNS rebinding, the acquisition component resolves the hostname, checks the resolved address against the block list, and connects to that same address.
 
+> **Scope — direct path vs. yt-dlp adapter.** The full guarantees in this section (per-address validation, connection pinning to the validated address, re-checking every redirect) apply to the **built-in direct-download path**. The optional `yt-dlp` adapter does its own resolution, connection, and redirect-following that the engine **cannot pin** — see "Optional yt-dlp adapter" below for the best-effort pre-checks it does receive and the residual risk that remains.
+
 Authenticated provider-account integrations (private Google Drive/S3/GCS/Azure/Dropbox files) are out of scope for 0.2.0.
 
 ## Acquisition model (FR-020)
@@ -97,6 +99,8 @@ Video-page URLs are acquired through the optional `yt-dlp` adapter, selected wit
 - Is never bundled with the skill or its packages and is detected independently of FFmpeg.
 - Requires the same remote enablement (FR-018) and rights confirmation (§19.6) as any other remote source.
 - Rejects DRM-protected sources without attempting circumvention.
+
+**Best-effort validation and residual risk (important).** Before launching yt-dlp, the engine applies the same **scheme allowlist** (SEC-013), **URL DRM-marker check** (SEC-017), and an **SSRF host resolution/validation** (SEC-014) — so obvious `file://`, unsupported-scheme, DRM, and internal-host cases are refused up front with no acquisition, and these pre-checks run *before* the missing-binary check so they apply whether or not yt-dlp is installed. However, yt-dlp then performs its **own** DNS resolution, connection, and redirect-following, which the engine **cannot pin**. Unlike the direct path, the yt-dlp path therefore does **not** guarantee the connection is bound to a validated address: a TOCTOU/DNS-rebinding change after the pre-check, or a redirect yt-dlp follows to a private address, is **not guaranteed** to be blocked. This is an accepted, documented residual risk (SEC-014). Prefer the direct HTTPS path for untrusted inputs.
 
 When the adapter is requested but `yt-dlp` is not installed, the engine returns `YTDLP_MISSING` (status `dependency_missing`, exit 3) and attempts no acquisition. Install guidance is in `references/installation.md`; `doctor --json` reports whether yt-dlp is available and its version.
 

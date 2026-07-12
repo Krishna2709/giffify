@@ -35,6 +35,7 @@ import contextlib
 import http.client
 import ipaddress
 import os
+import re
 import shutil
 import socket
 import ssl
@@ -46,7 +47,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import cleanup, dependencies, errors
+from . import __version__, cleanup, dependencies, errors
 from .progress import NULL_REPORTER, ProgressReporter
 
 # --- Tunables ---------------------------------------------------------------
@@ -54,7 +55,9 @@ _MAX_REDIRECTS = 5
 _CHUNK_SIZE = 65536
 _PROGRESS_MIN_INTERVAL = 0.25  # seconds between download progress events
 _CONNECT_TIMEOUT_CAP = 30.0  # per-socket-op ceiling; wall-clock is authoritative
-_USER_AGENT = "video-to-gif/0.2 (+https://github.com/Krishna2709/giffify)"
+# Derived from the package version so the User-Agent can never drift from the
+# release (FIX M1); a single source of truth in vtg/__init__.py.
+_USER_AGENT = f"video-to-gif/{__version__} (+https://github.com/Krishna2709/giffify)"
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 # Cloud instance-metadata endpoints (SEC-014). Link-local/private ranges below
@@ -140,6 +143,22 @@ def redact_url(url: str) -> str:
         port = None
     port_str = f":{port}" if port else ""
     return f"{parts.scheme.lower()}://{host}{port_str}{parts.path}"
+
+
+# Any http(s) URL embedded in an arbitrary message string. Used to scrub a URL
+# that might otherwise ride along in a free-form error message (e.g. the CLI's
+# INTERNAL_ERROR sink), applying the SEC-015 redaction rule as defense in depth.
+_URL_IN_TEXT = re.compile(r"https?://[^\s'\"<>]+")
+
+
+def redact_message_urls(text: str) -> str:
+    """Redact every http(s) URL substring in a free-form message (SEC-015).
+
+    A defensive companion to :func:`redact_url` for messages that are not a bare
+    URL: each embedded URL is reduced to scheme/host/path so a signed token or
+    embedded credential can never leak through a generic error string.
+    """
+    return _URL_IN_TEXT.sub(lambda m: redact_url(m.group(0)), text)
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +357,26 @@ def _resolve_and_validate(host: str, port: int, redacted: str, approved: frozens
     if not resolved:
         raise _download_failed(redacted, "host did not resolve to any address")
     return resolved[0]
+
+
+def _ytdlp_ssrf_precheck(host: str, port: int, redacted: str, approved: frozenset[str]) -> None:
+    """Best-effort SSRF pre-check for the yt-dlp adapter (SEC-014).
+
+    Resolve ``host`` and block if ANY resolved address is disallowed and not
+    explicitly approved (PRIVATE_NETWORK_BLOCKED, exit 8). Unlike the direct path
+    this CANNOT pin the connection -- yt-dlp re-resolves and connects on its own --
+    so a resolution failure here is deliberately non-fatal (yt-dlp may resolve
+    differently) and simply skips the block. The residual TOCTOU/redirect risk
+    that this pre-check cannot close is documented at the yt-dlp call site.
+    """
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError:
+        return  # best-effort: nothing resolved to validate; yt-dlp re-resolves
+    for info in infos:
+        ip = str(info[4][0])
+        if ip not in approved and address_is_disallowed(ip):
+            raise _private_blocked(redacted, ip)
 
 
 # ---------------------------------------------------------------------------
@@ -606,9 +645,19 @@ def _acquire_via_ytdlp(
     max_seconds: float,
 ) -> RemoteResult:
     # Detect (never install) the adapter first, so a missing yt-dlp never leaks a
-    # temp dir and is reported as YTDLP_MISSING (exit 3) with no acquisition.
+    # temp dir and is reported as YTDLP_MISSING (exit 3) with no acquisition. The
+    # scheme/DRM/SSRF pre-checks in acquire_remote_source have already run, so a
+    # bad scheme or blocked host is refused before we ever reach this point.
     ytdlp = dependencies.require_ytdlp()
     temp_dir = tempfile.mkdtemp(prefix="vtg-remote-")
+    # FR-021 free-disk pre-check before spawning yt-dlp (FIX m1). yt-dlp cannot
+    # declare a Content-Length in advance, so project against the full download
+    # ceiling (maxDownloadBytes), mirroring the direct path's projection.
+    try:
+        _check_free_disk(temp_dir, max_bytes, max_bytes, redacted)
+    except BaseException:
+        cleanup.remove_paths([temp_dir])
+        raise
     out_template = os.path.join(temp_dir, "vtg-remote.%(ext)s")
     # No shell; a fixed argument array. No credential/DRM-circumvention flags.
     cmd = [
@@ -625,6 +674,14 @@ def _acquire_via_ytdlp(
         out_template,
         url,
     ]
+    # RESIDUAL RISK (SEC-014): yt-dlp performs its OWN DNS resolution, connection,
+    # and redirect-following here, which the engine cannot pin. The scheme/DRM/SSRF
+    # pre-checks in acquire_remote_source are best-effort only; a DNS-rebinding /
+    # TOCTOU change between the pre-check and this fetch, or a redirect yt-dlp
+    # follows to a private address, is NOT guaranteed to be blocked. This is the
+    # documented, accepted residual risk -- the yt-dlp path does NOT carry the
+    # connection-pinning guarantee the direct path does (see SECURITY.md,
+    # references/remote-sources.md).
     try:
         proc = subprocess.run(
             cmd,
@@ -699,12 +756,39 @@ def acquire_remote_source(
     """
     redacted = redact_url(url)
     if adapter == "ytdlp":
-        return _acquire_via_ytdlp(
+        # FIX C1: yt-dlp resolves, connects, and follows redirects entirely on its
+        # own, OUTSIDE the engine's guard. Before launching it, enforce the same
+        # gates the direct path enforces, so the obvious file://, bad-scheme, DRM,
+        # and internal-host cases are refused up front with no acquisition:
+        #   1. scheme allowlist (SEC-013) -- http still needs the insecure ack;
+        #   2. URL-level DRM markers (SEC-017);
+        #   3. best-effort SSRF resolution/validation (SEC-014).
+        # These run BEFORE the YTDLP_MISSING detection so the guards apply whether
+        # or not yt-dlp is installed. They are best-effort only: yt-dlp re-resolves
+        # and connects itself, so a TOCTOU/rebinding change or a redirect it follows
+        # to a private address is NOT guaranteed to be blocked (documented residual
+        # risk, SEC-014 -- see _acquire_via_ytdlp's call site and SECURITY.md).
+        parts = urllib.parse.urlsplit(url)
+        scheme = (parts.scheme or "").lower()
+        ytdlp_warnings: list[str] = []
+        warn = _validate_scheme(scheme, allow_insecure_http, redacted)
+        if warn:
+            ytdlp_warnings.append(warn)
+        if url_has_drm_marker(url):
+            raise _drm_error(redacted)
+        host = parts.hostname
+        if host:
+            port = parts.port or (443 if scheme == "https" else 80)
+            _ytdlp_ssrf_precheck(host, port, redacted, approved_addresses)
+        result = _acquire_via_ytdlp(
             url,
             redacted,
             max_bytes=max_download_bytes,
             max_seconds=float(max_download_seconds),
         )
+        if ytdlp_warnings:
+            result.warnings = list(dict.fromkeys(ytdlp_warnings))
+        return result
 
     # Direct URL. Validate the scheme and URL-level DRM markers BEFORE creating a
     # temp dir so a bad scheme (e.g. file://) never touches the filesystem.
