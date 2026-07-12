@@ -71,6 +71,12 @@ packaged for both Claude Code and Codex from one shared source.
   cancellation test harness launches the engine with
   `CREATE_NEW_PROCESS_GROUP` and cancels via `CTRL_BREAK_EVENT` on Windows
   (SIGINT elsewhere).
+- **Portable structured paths on Windows** (spec §6.1, §13). The `path` and
+  `outputDirectory` fields of the JSON result now always use forward slashes, so
+  the structured contract is deterministic across platforms instead of leaking
+  Windows `\` separators. The test fixtures also clean their own temp
+  directories with a bounded retry so a subprocess's transient handle lock on
+  Windows cannot fail teardown.
 
 ### Security
 

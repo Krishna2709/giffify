@@ -439,6 +439,11 @@ def _display_path(path: str) -> str:
     try:
         rel = os.path.relpath(path, os.getcwd())
         if not rel.startswith(".."):
+            # Normalize to forward slashes so the structured `path`/`outputDirectory`
+            # contract (spec §13) is portable and deterministic across platforms;
+            # Windows os.path.relpath uses '\\', which would otherwise leak into the
+            # JSON. This is a no-op on POSIX where os.sep is already '/'.
+            rel = rel.replace(os.sep, "/")
             return "./" + rel if not rel.startswith("./") else rel
     except ValueError:
         pass

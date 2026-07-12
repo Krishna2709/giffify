@@ -30,6 +30,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from collections.abc import Callable
 from typing import Any
@@ -69,6 +70,26 @@ def find_tool(name: str) -> str | None:
 
 FFMPEG = find_tool("ffmpeg")
 FFPROBE = find_tool("ffprobe")
+
+
+def rmtree_with_retry(path: str, *, retry_seconds: float = 2.0, interval: float = 0.05) -> None:
+    """Remove a directory tree the fixture created, tolerating transient locks.
+
+    On Windows a subprocess the engine launched (ffmpeg reading the source, or
+    writing into ``output/``) may hold a handle for a few milliseconds after it
+    is terminated and reaped, and antivirus can hold brief locks; a single
+    ``shutil.rmtree`` then leaves the fixture's own temp dir behind. Retrying in
+    short sleeps until it is gone makes teardown deterministic. This guards only
+    the fixture's own directories -- the engine-leak assertions
+    (``_engine_temp_dirs``/``temp_gif_leftovers``) remain strict. No-op-cost on
+    POSIX, where the first attempt succeeds.
+    """
+    deadline = time.monotonic() + retry_seconds
+    while True:
+        shutil.rmtree(path, ignore_errors=True)
+        if not os.path.exists(path) or time.monotonic() >= deadline:
+            return
+        time.sleep(interval)
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +178,7 @@ class EngineTestCase(unittest.TestCase):
     @classmethod
     def tearDownClass(cls) -> None:
         if cls.media_dir:
-            shutil.rmtree(cls.media_dir, ignore_errors=True)
+            rmtree_with_retry(cls.media_dir)
             # The shared media dir must be outside the repo and fully removed.
             assert not os.path.exists(cls.media_dir), "class media dir not cleaned"
 
@@ -180,7 +201,7 @@ class EngineTestCase(unittest.TestCase):
         self._temp_snapshot = self._engine_temp_dirs()
 
     def tearDown(self) -> None:
-        shutil.rmtree(self.project, ignore_errors=True)
+        rmtree_with_retry(self.project)
         self.assertFalse(os.path.exists(self.project), "project temp dir not cleaned")
         leaked = self._engine_temp_dirs() - self._temp_snapshot
         self.assertEqual(
