@@ -999,7 +999,18 @@ def _install_signal_handlers() -> None:
     def handler(signum: int, frame: FrameType | None) -> None:
         _CANCEL_EVENT.set()
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
+    signals = [signal.SIGINT, signal.SIGTERM]
+    # Windows delivers console cancellation as CTRL_BREAK -> SIGBREAK (a
+    # CTRL_C_EVENT/CTRL_BREAK_EVENT sent to the engine's process group), so the
+    # SIGINT/SIGTERM pair alone would never observe cancellation there. Register
+    # SIGBREAK too when the platform defines it (Windows only) so cancellation
+    # works cross-platform per spec section 16. getattr keeps this a no-op on
+    # POSIX, where signal has no SIGBREAK.
+    sigbreak = getattr(signal, "SIGBREAK", None)
+    if sigbreak is not None:
+        signals.append(sigbreak)
+
+    for sig in signals:
         # Not on the main thread (e.g. under a test runner) -> cannot install.
         with contextlib.suppress(ValueError, OSError):  # pragma: no cover
             signal.signal(sig, handler)

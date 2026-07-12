@@ -250,24 +250,39 @@ class EngineTestCase(unittest.TestCase):
         trigger: Callable[[dict[str, Any]], bool],
         *,
         cwd: str | None = None,
-        send_signal: int = signal.SIGINT,
+        send_signal: int | None = None,
         timeout: int = 180,
     ) -> EngineResult:
         """Run the engine, and when a stderr progress event satisfies ``trigger``,
-        deliver ``send_signal`` to the engine process. Used for cancellation tests.
+        deliver a cancellation signal to the engine process. Used for cancellation
+        tests.
+
+        The signal is platform-appropriate: POSIX uses SIGINT; Windows cannot
+        deliver SIGINT to a subprocess (``send_signal`` raises ``ValueError:
+        Unsupported signal: 2``), so the engine is launched in its own process
+        group (``CREATE_NEW_PROCESS_GROUP``) and cancelled with
+        ``CTRL_BREAK_EVENT``, which the engine receives as SIGBREAK (spec §16).
+        Cancellation semantics are identical, so callers' assertions are unchanged.
+        Pass ``send_signal`` to override the default for a specific platform test.
         """
         cwd = cwd or self.project
         argv = [sys.executable, ENTRY] + [str(a) for a in args]
         if "--json" not in argv:
             argv.append("--json")
-        proc = subprocess.Popen(
-            argv,
-            cwd=cwd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        popen_kwargs: dict[str, Any] = {
+            "cwd": cwd,
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+        }
+        if sys.platform == "win32":
+            # Own process group so CTRL_BREAK_EVENT reaches only the engine.
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            cancel_signal = signal.CTRL_BREAK_EVENT if send_signal is None else send_signal
+        else:
+            cancel_signal = signal.SIGINT if send_signal is None else send_signal
+        proc = subprocess.Popen(argv, **popen_kwargs)
         stdout_chunks: list[str] = []
 
         def _drain_stdout() -> None:
@@ -292,7 +307,7 @@ class EngineTestCase(unittest.TestCase):
             except json.JSONDecodeError:
                 continue
             if isinstance(ev, dict) and trigger(ev):
-                proc.send_signal(send_signal)
+                proc.send_signal(cancel_signal)
                 fired = True
         proc.wait(timeout=timeout)
         t.join(timeout=timeout)

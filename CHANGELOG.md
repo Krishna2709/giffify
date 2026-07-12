@@ -58,6 +58,20 @@ packaged for both Claude Code and Codex from one shared source.
 - **Continuous integration** matrix across Ubuntu, macOS, and Windows on Python
   3.10 and 3.12 (spec §22.3).
 
+### Fixed
+
+- **Windows cancellation and temp-file cleanup** (spec §6.1, §16, SEC-011). The
+  engine now registers a `SIGBREAK` handler on Windows alongside `SIGINT`/
+  `SIGTERM`, so a `CTRL_BREAK_EVENT` delivered to its process group cancels
+  cleanly. All cleanup paths (resource-limit breach, cancellation, failure, and
+  the conversion pipeline's temp-dir removal) now wait for the terminated FFmpeg
+  process to exit and delete temp artifacts with a bounded retry, so partial
+  `.vtg-*.gif.tmp` output and `vtg-*` palette temp directories no longer leak on
+  Windows where a just-killed process briefly holds its file handles. The
+  cancellation test harness launches the engine with
+  `CREATE_NEW_PROCESS_GROUP` and cancels via `CTRL_BREAK_EVENT` on Windows
+  (SIGINT elsewhere).
+
 ### Security
 
 - Local-only processing with no network access in 0.1.0; URL sources return
