@@ -218,6 +218,43 @@ def write_checksums(package_root: Path) -> Path:
     return checksum_path
 
 
+_PACKAGE_README = """\
+# video-to-gif ({platform_title} plugin package)
+
+Generate optimized animated GIFs from explicit video timestamp ranges. This
+package wraps the portable `video-to-gif` Agent Skill for {platform_title}.
+
+- Version: {version}
+- Author: {author} ({author_url})
+- License: MIT
+- Source repository: https://github.com/Krishna2709/giffify
+- Requirements: Python 3.10+ and the `ffmpeg`/`ffprobe` executables on PATH
+  (`pip install ffmpeg` is NOT FFmpeg)
+
+The skill itself lives under `skills/video-to-gif/` (SKILL.md plus the
+deterministic Python engine, references, and JSON schemas). Version 0.1.0
+processes local video files only and performs no network access; see
+`skills/video-to-gif/references/` and the repository's SECURITY.md for the
+security model.
+
+This directory is GENERATED from the canonical source at
+`src/skill/video-to-gif/` by `tools/build_packages.py` — do not edit it by
+hand. `CHECKSUMS.sha256` covers every file in this package.
+"""
+
+
+def write_package_readme(package_root: Path, platform: str) -> None:
+    """Write a per-package README so the package is self-describing (catalog reviews)."""
+    titles = {"claude": "Claude Code", "codex": "Codex"}
+    content = _PACKAGE_README.format(
+        platform_title=titles.get(platform, platform),
+        version=PLUGIN_VERSION,
+        author=PLUGIN_AUTHOR["name"],
+        author_url=PLUGIN_AUTHOR["url"],
+    )
+    (package_root / "README.md").write_text(content, encoding="utf-8")
+
+
 def build_platform(platform: str, manifest_dirname: str, root: Path, source_skill: Path) -> Path:
     package_root = root / "packages" / platform / SKILL_NAME
     dest_skill = package_root / "skills" / SKILL_NAME
@@ -237,8 +274,9 @@ def build_platform(platform: str, manifest_dirname: str, root: Path, source_skil
     # 2. Verify byte-identical.
     verify_byte_identical(source_skill, dest_skill)
 
-    # Write the plugin manifest (spec §21.2 / §21.3).
+    # Write the plugin manifest (spec §21.2 / §21.3) and a self-describing README.
     write_manifest(package_root / manifest_dirname / "plugin.json")
+    write_package_readme(package_root, platform)
 
     # 7. Ensure the copied package contains no forbidden files (defense in depth).
     check_no_forbidden_files(dest_skill)
