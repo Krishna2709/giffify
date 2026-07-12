@@ -12,3 +12,7 @@ output/
 excalidraw.log
 dn_v1.gif
 .DS_Store
+
+# Local secrets and experiment media — never commit
+.env
+test-media/
