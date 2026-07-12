@@ -24,7 +24,8 @@ The current product version is **0.1.0**. This exact string must be identical in
 - `pyproject.toml` (`[project].version`)
 - `CHANGELOG.md` (the `[0.1.0]` section)
 - both generated plugin manifests (`packages/*/video-to-gif/.­*-plugin/plugin.json`)
-- both marketplace files (`marketplaces/*/**/marketplace.json`)
+- both marketplace files (root `.claude-plugin/marketplace.json` and
+  `.agents/plugins/marketplace.json`)
 
 `tools/validate_release.py` enforces that these agree.
 
@@ -108,9 +109,9 @@ they are not reimplemented by the stdlib tools above.
 
 The repository provides marketplace metadata for both platforms:
 
-- **Claude Code** — `marketplaces/claude/.claude-plugin/marketplace.json` listing
+- **Claude Code** — the repository-root `.claude-plugin/marketplace.json` listing
   the `video-to-gif` plugin.
-- **Codex** — `marketplaces/codex/.agents/plugins/marketplace.json` for
+- **Codex** — the repository-root `.agents/plugins/marketplace.json` for
   repository and personal marketplace installation.
 
 Marketplace entries MUST pin an exact plugin version, pass platform validation

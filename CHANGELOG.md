@@ -8,7 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Changes staged for the next release beyond 0.1.0 will be listed here.
+### Fixed
+
+- **Marketplace files moved to the repository root** (`.claude-plugin/marketplace.json`
+  and `.agents/plugins/marketplace.json`, previously under `marketplaces/`).
+  `claude plugin marketplace add owner/repo` resolves the marketplace manifest at
+  the repository root, so the nested layout made the plugin uninstallable from
+  the repo. Plugin `source` paths now correctly resolve to `./packages/...` from
+  the root.
 
 ## [0.1.0] - 2026-07-12
 

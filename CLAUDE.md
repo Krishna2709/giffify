@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project state
 
-The v0.1.0 implementation is complete: engine at `src/skill/video-to-gif/scripts/` (stdlib-only `vtg/` package + CLI), skill content (SKILL.md, references/, assets/ schemas), four test suites under `tests/`, packaging tooling under `tools/`, generated `packages/{claude,codex}` trees, marketplace metadata under `marketplaces/`, and CI at `.github/workflows/ci.yml`. Not yet a git repository. Release gates still open: license, maintainer identity, repo URLs (spec §26).
+The v0.1.0 implementation is complete: engine at `src/skill/video-to-gif/scripts/` (stdlib-only `vtg/` package + CLI), skill content (SKILL.md, references/, assets/ schemas), four test suites under `tests/`, packaging tooling under `tools/`, generated `packages/{claude,codex}` trees, marketplace metadata at the repo root (`.claude-plugin/marketplace.json` for Claude Code, `.agents/plugins/marketplace.json` for Codex — root placement is required for `claude plugin marketplace add owner/repo` to work), and CI/CD under `.github/workflows/`. Live at github.com/Krishna2709/giffify with v0.1.0 released.
 
 ## Commands
 

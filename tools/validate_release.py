@@ -271,8 +271,8 @@ def find_plugin_version(data: object, name: str) -> str | None:
 
 def check_marketplaces(root: Path, expected: str, report: Reporter) -> None:
     files = [
-        ("claude", root / "marketplaces" / "claude" / ".claude-plugin" / "marketplace.json"),
-        ("codex", root / "marketplaces" / "codex" / ".agents" / "plugins" / "marketplace.json"),
+        ("claude", root / ".claude-plugin" / "marketplace.json"),
+        ("codex", root / ".agents" / "plugins" / "marketplace.json"),
     ]
     for platform, path in files:
         if not path.is_file():

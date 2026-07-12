@@ -73,10 +73,12 @@ Copy `src/skill/video-to-gif/` into one of:
 
 For versioned, discoverable distribution the skill is wrapped in thin plugins:
 
-- **Claude Code** — add the marketplace (`marketplaces/claude/.claude-plugin/marketplace.json`),
-  then install the `video-to-gif` plugin from it.
-- **Codex** — add the marketplace (`marketplaces/codex/.agents/plugins/marketplace.json`),
-  then install the `video-to-gif` plugin from it.
+- **Claude Code** — add this repository as a marketplace
+  (`claude plugin marketplace add Krishna2709/giffify` — served from the root
+  `.claude-plugin/marketplace.json`), then install the `video-to-gif` plugin
+  from it.
+- **Codex** — the repository's root `.agents/plugins/marketplace.json` serves
+  the Codex marketplace; add it and install the `video-to-gif` plugin from it.
 
 Platform packages under `packages/` are **generated** from the canonical source by
 `tools/build_packages.py` — never edit them by hand.
