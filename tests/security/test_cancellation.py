@@ -52,6 +52,37 @@ class TestCancellation(EngineTestCase):
 
         res = self.run_engine_until(["batch", "--manifest", m], trigger, timeout=120)
 
+        # --- TEMP DIAGNOSTIC (remove before final) ------------------------
+        import subprocess as _sp
+
+        print("\n=== CANCEL DIAG START ===", file=sys.stderr)
+        print(f"returncode={res.returncode} status={res.status!r}", file=sys.stderr)
+        print(
+            f"events={[(e.get('event'), e.get('clipIndex')) for e in res.events]}", file=sys.stderr
+        )
+        print("STDERR TAIL:\n" + res.stderr[-1500:], file=sys.stderr)
+        try:
+            print(f"project listing={os.listdir(self.project)}", file=sys.stderr)
+            if os.path.isdir(self.output_dir):
+                print(f"output listing={os.listdir(self.output_dir)}", file=sys.stderr)
+            print(f"media listing={os.listdir(self.media_dir)}", file=sys.stderr)
+        except OSError as _e:
+            print(f"listing error: {_e}", file=sys.stderr)
+        if sys.platform == "win32":
+            for img in ("ffmpeg.exe", "ffprobe.exe"):
+                try:
+                    tl = _sp.run(
+                        ["tasklist", "/FI", f"IMAGENAME eq {img}", "/FO", "CSV"],
+                        capture_output=True,
+                        text=True,
+                        timeout=15,
+                    )
+                    print(f"tasklist {img}:\n{tl.stdout}", file=sys.stderr)
+                except OSError as _e:
+                    print(f"tasklist error: {_e}", file=sys.stderr)
+        print("=== CANCEL DIAG END ===\n", file=sys.stderr)
+        # --- END TEMP DIAGNOSTIC ------------------------------------------
+
         # Contract: cancelled status and exit code 10.
         self.assert_exit(res, 10)  # EXIT_CANCELLED
         self.assert_status(res, "cancelled")
