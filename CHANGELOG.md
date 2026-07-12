@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Changes staged for the next release beyond 0.1.0 will be listed here.
 
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-07-12
 
 Initial implementation of the `video-to-gif` Agent Skill: deterministic,
 timestamp-based conversion of **local** video files into optimized animated GIFs,
