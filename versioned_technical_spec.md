@@ -4,10 +4,10 @@ Versioned Technical Specification
 
 Field	Value
 Document ID	VTG-TS-001
-Specification version	0.1.0-draft.2
-Product version	0.1.0
+Specification version	0.2.0-draft.1
+Product version	0.2.0
 Status	Draft for implementation
-Date	July 11, 2026
+Date	July 12, 2026
 Target agents	Claude Code and OpenAI Codex
 Core runtime	Python and FFmpeg
 License	MIT
@@ -26,6 +26,8 @@ The first release supports deterministic, timestamp-based conversion. Users must
 * Multiple timestamp ranges.
 * A CSV manifest.
 * A JSON manifest.
+
+The source video is a local file by default. Beginning with version 0.2.0, the source MAY instead be a remote HTTP or HTTPS URL. Remote source acquisition is disabled by default and is gated by explicit enablement and approval (see FR-018 and section 17).
 
 The implementation will consist of:
 
@@ -84,15 +86,14 @@ The product SHOULD:
 5. make filesystem and network operations explicit.
 6. support future transformations without breaking the initial interface.
 
-3.3 Non-goals for version 0.1.0
+3.3 Non-goals for version 0.2.0
 
-Version 0.1.0 will not include:
+Version 0.2.0 will not include:
 
 * Automatic highlight or interesting-moment detection.
 * Multimodal video understanding.
 * Transcript-based clip selection.
-* YouTube or video-platform downloading.
-* Authenticated cloud-storage integrations.
+* Authenticated cloud-storage or provider-account integrations, including Google Drive private files, private S3, GCS, or Azure objects, and authenticated Dropbox files.
 * Captions or subtitle rendering.
 * Cropping.
 * Playback-speed changes.
@@ -100,8 +101,9 @@ Version 0.1.0 will not include:
 * A hosted conversion service.
 * An MCP server.
 * DRM bypass or access-control circumvention.
+* Uploading source videos, generated GIFs, frames, metadata, or filenames to any remote endpoint. Remote access is download-only.
 
-Remote sources are planned for version 0.2.0.
+Version 0.2.0 adds opt-in remote source acquisition for direct HTTP and HTTPS media URLs, with an optional yt-dlp adapter for video-page URLs. Remote acquisition is disabled by default and is specified normatively in FR-018 through FR-023 and SEC-012 through SEC-017. Authenticated provider integrations remain planned for a later release.
 
 ⸻
 
@@ -158,6 +160,8 @@ The Claude Code or Codex agent MUST handle:
 * Obtaining approval for installation.
 * Obtaining approval for overwrite operations.
 * Obtaining approval for external output paths.
+* Obtaining approval for network access to a remote source.
+* Obtaining the user's confirmation of a lawful basis for a remote source.
 * Explaining warnings and failures.
 * Producing the final one-line summary.
 
@@ -169,6 +173,7 @@ The Python engine MUST handle:
 * Path normalization.
 * Configuration validation.
 * Manifest parsing.
+* Remote source acquisition to a secure temporary directory, when remote sources are enabled.
 * Timestamp conversion.
 * Media inspection.
 * Output planning.
@@ -180,6 +185,8 @@ The Python engine MUST handle:
 * Structured results.
 
 The Python engine MUST NOT conduct an interactive conversation.
+
+Only the remote source acquisition component performs network access, and only after remote sources are enabled or approved (FR-018). Media inspection and conversion remain network-isolated under SEC-010, and a downloaded source is treated as untrusted local media (SEC-012).
 
 FFmpeg and ffprobe
 
@@ -317,6 +324,8 @@ The doctor command MUST verify:
 * The temporary directory is writable.
 * The requested output directory is writable, when supplied.
 
+The doctor command MUST also report whether the optional yt-dlp adapter is available and, when present, its version. The absence of yt-dlp MUST NOT be reported as a failure, because the adapter is optional (FR-022).
+
 The project MUST NOT treat pip install ffmpeg as installation of the FFmpeg executable.
 
 6.4 Dependency installation
@@ -343,11 +352,11 @@ Proposed metadata:
 
 ---
 name: video-to-gif
-description: Convert explicit timestamp ranges from local video files into one or more optimized animated GIFs. Use when a user asks to create a GIF from a video, extract timestamped clips as GIFs, or batch-generate GIFs from CSV or JSON timestamp manifests.
+description: Convert explicit timestamp ranges from local video files into one or more optimized animated GIFs. Use when a user asks to create a GIF from a video, extract timestamped clips as GIFs, batch-generate GIFs from CSV or JSON timestamp manifests, or convert a remote video URL when remote sources are enabled.
 license: LICENSE
-compatibility: Requires Python 3.10+, ffmpeg, and ffprobe. Supports macOS, Windows, and Linux. Version 0.1 processes local video files only.
+compatibility: Requires Python 3.10+, ffmpeg, and ffprobe. Supports macOS, Windows, and Linux. Version 0.2.0 processes local video files by default and can optionally acquire remote HTTP or HTTPS source URLs when remote sources are explicitly enabled.
 metadata:
-  product-version: "0.1.0"
+  product-version: "0.2.0"
   specification: "VTG-TS-001"
 ---
 
@@ -623,6 +632,86 @@ Created 9 GIFs in ./output; 1 clip failed during encoding.
 
 A detailed result MAY be shown when the user asks for it or when failures require explanation.
 
+FR-018: Remote source enablement
+
+Remote source acquisition MUST be disabled by default.
+
+The remoteSources configuration field MUST accept exactly one of:
+
+* disabled: remote sources are rejected. This is the default.
+* ask: the agent MUST obtain explicit user approval before each remote acquisition.
+* enabled: remote sources are permitted without a per-request approval prompt.
+
+When a source is a remote URL and the effective remoteSources value is disabled, the engine MUST reject the source with error code REMOTE_DISABLED and exit code 8, status remote_disabled, and MUST NOT perform any network access.
+
+The --allow-remote command-line flag MUST override a disabled or ask configuration for a single invocation. When remoteSources is ask, the agent layer MUST obtain explicit user approval before supplying --allow-remote.
+
+Enablement alone MUST NOT authorize access to private-network addresses (SEC-014) or bypass the URL scheme allowlist (SEC-013).
+
+In version 0.1.0 a remote URL produced an UNSUPPORTED_REMOTE_SOURCE result (SEC-005). In version 0.2.0 the disabled-by-default behavior is reported as REMOTE_DISABLED; the version 0.1.0 result remains the documented behavior of the version 0.1.0 product.
+
+FR-019: Supported remote source types
+
+Version 0.2.0 supports acquiring a source from a direct HTTP or HTTPS media URL that FFmpeg or a plain download can read, including signed cloud-storage URLs, which are treated as direct URLs.
+
+A source URL MAY be supplied wherever a source is specified, including the --input argument and the manifest input field, and is subject to FR-018 enablement.
+
+Video-page URLs, such as video-platform watch pages, are supported only through the optional yt-dlp adapter (FR-022), which requires separate approval and a separately detected dependency and is never bundled.
+
+The following MUST be rejected rather than acquired:
+
+* DRM-protected or otherwise access-controlled sources, with error code DRM_PROTECTED and exit code 5. The engine MUST NOT attempt to bypass DRM, authentication, or access controls.
+* URLs whose scheme is not permitted by SEC-013, with error code UNSUPPORTED_URL_SCHEME and exit code 5.
+
+Authenticated provider-account integrations are out of scope for version 0.2.0 (section 3.3).
+
+FR-020: Remote acquisition and cleanup
+
+When a remote source is permitted, the engine MUST:
+
+1. Download the source into a secure temporary directory with an unpredictable name in the operating-system temporary location (section 16).
+2. Convert the downloaded file using the existing local conversion pipeline (section 15), which remains network-isolated under SEC-010 and treats the downloaded file as untrusted local media.
+3. Delete the downloaded source after the job completes, whether it succeeded or failed.
+
+The engine MUST retain the downloaded source only when the user explicitly requests retention through the keepRemoteSource configuration field or the --keep-remote-source flag. When retained, the engine MUST report the retained file path in the structured result.
+
+Downloaded sources MUST count toward the temporary-disk accounting enforced by SEC-011 and MUST be removed by the cleanup rules in section 16 on success, failure, or cancellation.
+
+When a remote acquisition fails, the affected job status MUST be failed, or partial_success when other clips in a batch succeed, consistent with FR-016.
+
+FR-021: Download limits and hardening
+
+The engine MUST enforce, for every remote acquisition:
+
+* A maximum download size, limits.maxDownloadBytes, with a documented default of 2147483648 bytes (2 GiB). The ceiling MUST be enforced during streaming based on bytes actually received, not solely on a declared Content-Length. Exceeding the ceiling MUST produce error code REMOTE_TOO_LARGE and exit code 13.
+* A download wall-clock timeout, limits.maxDownloadSeconds, with a documented default of 900 seconds. Exceeding the timeout MUST abort the download with error code REMOTE_DOWNLOAD_FAILED and exit code 14.
+* A free-disk check before the download begins. When available free space is insufficient for the projected download plus existing temporary usage, the engine MUST refuse the download with error code RESOURCE_LIMIT_EXCEEDED and exit code 13.
+
+A Content-Type header or URL file extension MAY be used for an early advisory check but MUST NOT be treated as authoritative. ffprobe inspection under section 15 remains the authoritative gate for whether a downloaded file is usable media.
+
+A network error, an HTTP error status, or a truncated or incomplete download MUST produce error code REMOTE_DOWNLOAD_FAILED and exit code 14. On any download failure or cancellation, partial downloads MUST be removed under section 16.
+
+FR-022: Optional yt-dlp adapter
+
+Video-page URLs MAY be acquired through an optional yt-dlp adapter, selected with --remote-adapter ytdlp.
+
+The adapter MUST:
+
+* Be treated as an optional dependency that is never bundled with the skill or its packages.
+* Be detected independently of FFmpeg. When the adapter is requested but yt-dlp is not available, the engine MUST report error code YTDLP_MISSING with exit code 3, status dependency_missing, and MUST NOT attempt acquisition.
+* Require the same remote enablement as FR-018 and the same rights confirmation as section 19.6.
+* Reject DRM-protected sources under FR-019 without attempting circumvention.
+
+The doctor command MUST report yt-dlp availability and version under section 6.3.
+
+FR-023: Remote acquisition results and progress
+
+A successful remote acquisition MUST NOT change the structure of the final result defined in section 13 beyond additive fields.
+
+The engine MUST emit download progress as progress events on standard error using stage "download", consistent with section 13.3. Each event SHOULD include bytes received and, when a total size is known, a percentage. When the total size is unknown, the percentage MAY be omitted.
+
+Any URL echoed in the structured result, warnings, progress events, or errors MUST be redacted under SEC-015.
+
 ⸻
 
 9. Project configuration
@@ -651,9 +740,12 @@ Example:
   "keepTemporaryFiles": false,
   "allowOutsideProject": false,
   "remoteSources": "disabled",
+  "keepRemoteSource": false,
   "limits": {
     "maxClipProcessingSeconds": 600,
-    "maxTemporaryBytes": 2147483648
+    "maxTemporaryBytes": 2147483648,
+    "maxDownloadBytes": 2147483648,
+    "maxDownloadSeconds": 900
   }
 }
 
@@ -678,9 +770,24 @@ Configuration MUST NOT contain:
 * Arbitrary shell commands.
 * Executable hook definitions.
 
+This restriction extends to remote source definitions: configuration MUST NOT embed credentials, access tokens, or signed-URL query parameters in any remote source URL. Signed or credentialed URLs MUST be supplied per request, not stored in configuration.
+
 Malformed configuration MUST produce a validation error with a specific field path.
 
 Unknown fields SHOULD generate warnings rather than being silently accepted.
+
+9.5 Remote source configuration
+
+The remoteSources field controls remote acquisition and MUST default to disabled. Permitted values and their behavior are defined in FR-018.
+
+The keepRemoteSource field MUST default to false. When true, a downloaded remote source is retained after the job and its path is reported in the structured result (FR-020).
+
+The limits object MUST support:
+
+* maxDownloadBytes: the maximum size of a single remote download, enforced during streaming. Default 2147483648.
+* maxDownloadSeconds: the download wall-clock timeout, in seconds. Default 900.
+
+These fields are additive and do not change the configuration schemaVersion. A configuration that omits them MUST behave as though the documented defaults were supplied.
 
 ⸻
 
@@ -800,6 +907,7 @@ Responsibilities:
 * Detect ffprobe.
 * Detect required filters and encoder support.
 * Test temporary-directory access.
+* Report optional yt-dlp availability and version when present.
 * Return proposed installation guidance for missing dependencies.
 
 12.2 Inspect
@@ -874,6 +982,22 @@ python scripts/video_to_gif.py validate-manifest \
   --manifest "./clips.json" \
   --json
 
+12.8 Remote sources
+
+The create, batch, and inspect commands MUST accept an http or https URL wherever they accept a source, but only when remote sources are enabled under FR-018. When a URL is supplied and remote sources are disabled, the command MUST fail with error code REMOTE_DISABLED and exit code 8 without performing network access.
+
+Additional flags:
+
+* --allow-remote: enable remote acquisition for a single invocation, overriding a disabled or ask configuration (FR-018).
+* --keep-remote-source: retain the downloaded source after the job and report its path (FR-020).
+* --remote-adapter ytdlp: acquire a video-page URL through the optional yt-dlp adapter (FR-022).
+* --allow-insecure-http: permit an http URL with an unencrypted-transfer warning (SEC-013).
+* --allow-remote-address <address>: approve one otherwise-blocked private-network or loopback address for this invocation (SEC-014).
+
+For inspect on a URL, the engine MUST acquire the source under FR-020 before running ffprobe, because inspection is network-isolated under SEC-010.
+
+These additions are backward compatible. Existing local invocations MUST behave exactly as in version 0.1.0 (NFR-006).
+
 ⸻
 
 13. Structured result contract
@@ -936,8 +1060,11 @@ Supported values:
 * validation_failed.
 * collision.
 * dependency_missing.
+* remote_disabled.
 * cancelled.
 * dry_run.
+
+The remote_disabled status applies when a remote URL is supplied but remote sources are disabled and not overridden (FR-018). Adding this value is additive and does not change the structured result schemaVersion.
 
 13.3 Progress output
 
@@ -956,6 +1083,12 @@ Example:
 {"event":"stage_progress","clipIndex":0,"stage":"encode","percent":83.0}
 {"event":"clip_completed","clipIndex":0,"path":"./output/opening.gif"}
 
+When a remote source is acquired, download progress MUST use stage "download":
+
+{"event":"stage_progress","stage":"download","bytesReceived":10485760,"totalBytes":52428800,"percent":20.0}
+
+The totalBytes field MAY be null when the source does not declare a size, in which case percent MAY be omitted. Any URL that appears in a progress event MUST be redacted under SEC-015.
+
 ⸻
 
 14. Exit codes
@@ -965,17 +1098,26 @@ Code	Meaning
 2	Invalid CLI usage or malformed schema
 3	Required dependency missing
 4	Input not found or inaccessible
-5	Invalid or unsupported media
+5	Invalid or unsupported media or source type
 6	Invalid timestamp or clip definition
 7	Output collision
-8	Filesystem permission or project-boundary violation
+8	Filesystem, project-boundary, or network-policy violation
 9	FFmpeg conversion failure
 10	Operation cancelled
 11	Partial batch success
 12	Internal engine error
 13	Resource limit exceeded
+14	Remote acquisition failure
 
 Detailed error codes MUST also be included in structured JSON.
+
+Remote source failures reuse existing exit codes where the semantics fit and add exit code 14 only where they do not:
+
+* 3: YTDLP_MISSING.
+* 5: UNSUPPORTED_URL_SCHEME, DRM_PROTECTED.
+* 8: REMOTE_DISABLED, PRIVATE_NETWORK_BLOCKED.
+* 13: REMOTE_TOO_LARGE, and RESOURCE_LIMIT_EXCEEDED for a free-disk or temporary-disk breach during download.
+* 14: REMOTE_DOWNLOAD_FAILED, covering network errors, HTTP error statuses, truncated downloads, and the download wall-clock timeout.
 
 Internal stack traces MUST NOT be shown by default. A --debug option MAY expose diagnostic details.
 
@@ -1064,6 +1206,8 @@ On cancellation, it MUST:
 8. return status cancelled.
 9. identify how many clips completed before cancellation.
 
+When a remote source was being downloaded, cancellation and failure MUST also remove any incomplete or partial download, unless the user requested retention under FR-020. A retained download MUST be preserved like a completed output.
+
 Temporary files MUST use unpredictable names in an appropriate temporary directory.
 
 Temporary files MUST be removed after success or failure unless:
@@ -1073,6 +1217,8 @@ Temporary files MUST be removed after success or failure unless:
 }
 
 This debugging option SHOULD be disabled by default.
+
+The secure temporary directory used for remote downloads is subject to the same unpredictable-naming, cleanup, and temporary-disk accounting rules as other temporary files.
 
 ⸻
 
@@ -1186,11 +1332,66 @@ Exit-code precedence for limit breaches: exit code 13 applies when the job produ
 
 The engine SHOULD reject sources whose declared dimensions or frame counts are implausibly large before decoding begins.
 
+SEC-012: Remote source network boundary
+
+Network access MUST be performed only to acquire a user-specified remote source, and only after remote sources are enabled or approved under FR-018.
+
+Only the remote source acquisition component MUST be network-capable. Media inspection, palette generation, and encoding MUST remain network-isolated under SEC-010, which stays in force unchanged. A downloaded source MUST be treated as untrusted local media and MUST be inspected with the same protocol whitelist and reference-following container rejection as any other local input.
+
+A remote URL supplied while remoteSources is disabled MUST NOT cause any network access (FR-018).
+
+SEC-013: URL scheme allowlist
+
+Remote source URLs MUST be restricted to an allowlist of schemes.
+
+* https MUST be permitted.
+* http MAY be permitted only through the explicit --allow-insecure-http flag, and the engine MUST emit a warning that the transfer is unencrypted. Without the flag, http MUST be rejected as UNSUPPORTED_URL_SCHEME.
+* file and all other schemes MUST be rejected with error code UNSUPPORTED_URL_SCHEME and exit code 5, and MUST NOT be fetched or opened.
+
+The scheme allowlist MUST be enforced before any network connection is attempted, and MUST be re-enforced on every redirect target.
+
+SEC-014: Private-network and SSRF protection
+
+The acquisition component MUST guard against server-side request forgery.
+
+Requests to the following MUST be blocked unless the user explicitly approves the specific address through the --allow-remote-address flag, with error code PRIVATE_NETWORK_BLOCKED and exit code 8:
+
+* Loopback addresses.
+* Private-network ranges.
+* Link-local and unique-local ranges.
+* Cloud instance-metadata endpoints.
+
+To resist DNS rebinding, the acquisition component MUST resolve the hostname, evaluate the resolved address against the block list, and then connect to that same resolved address. The block list MUST be re-evaluated for every redirect target. When an implementation cannot bind the connection to the validated address, it MUST document the accepted residual risk.
+
+SEC-015: Credential and token redaction
+
+The engine MUST NOT log signed-URL query parameters or embedded credentials.
+
+The engine MUST apply a single redaction rule to any source URL echoed anywhere, including logs, errors, warnings, progress events, and structured results: strip the query string and any userinfo component, retaining only scheme, host, and path. Fragments and query strings MUST NOT be reproduced.
+
+Credentials, access tokens, and signed-URL query parameters MUST NOT be stored in project configuration (section 9.4) or in manifests (SEC-009). They MUST be supplied per request.
+
+SEC-016: Download hardening
+
+Every remote download MUST enforce the size ceiling, wall-clock timeout, and free-disk check defined in FR-021.
+
+The size ceiling MUST be enforced on bytes actually received during streaming, independent of any declared Content-Length. Content-Type and URL-extension checks are advisory only; ffprobe inspection remains the authoritative media gate.
+
+Partial downloads MUST be removed on failure or cancellation under section 16, and every download MUST count toward the temporary-disk accounting of SEC-011.
+
+SEC-017: DRM and access-control integrity
+
+The engine MUST NOT bypass, disable, or circumvent DRM, encryption, authentication, or platform access controls.
+
+A source detected as DRM-protected or otherwise access-controlled MUST be rejected with error code DRM_PROTECTED and exit code 5. The optional yt-dlp adapter MUST NOT be used to circumvent access controls.
+
 ⸻
 
 18. Privacy requirements
 
-Version 0.1.0 MUST process videos locally.
+Video conversion MUST be performed locally in every version.
+
+In version 0.2.0, the skill performs network access solely to download a user-specified remote source, and only after remote sources are enabled or approved (SEC-012). All remote access is download-only.
 
 The skill MUST NOT upload:
 
@@ -1200,7 +1401,7 @@ The skill MUST NOT upload:
 * Metadata.
 * Filenames.
 
-The documentation MUST clearly state that version 0.1.0 performs local processing only.
+The documentation MUST clearly state that conversion is local by default, that remote source acquisition is opt-in and disabled by default, and that all remote access is download-only. The repository PRIVACY.md MUST be updated in the same release to describe the remote acquisition model, the enablement policy, and the download-only guarantee (NFR-007).
 
 Telemetry MUST be disabled by default.
 
@@ -1225,6 +1426,7 @@ Before conversion, the skill MUST have:
 * A quality profile.
 * An output directory.
 * An explicit collision policy when collisions exist.
+* Remote-access approval and a rights confirmation when the source is remote (section 19.6).
 
 19.2 Questions the agent should ask
 
@@ -1238,6 +1440,8 @@ Typical questions:
 * What should happen to existing files?
 * Should an invalid batch row be corrected, skipped, or clamped?
 * Is writing to the external destination approved?
+* Should network access be enabled to download a remote source?
+* Does the user have a lawful basis to use the remote video?
 
 19.3 Questions the agent should not repeat
 
@@ -1270,6 +1474,17 @@ The skill MUST ask when ambiguity could change:
 * Quality profile.
 
 The skill SHOULD make deterministic assumptions for harmless details such as default looping and temporary-file cleanup.
+
+19.6 Remote source approval and rights confirmation
+
+Before acquiring a remote source, the agent MUST:
+
+1. Obtain approval for network access when remoteSources is ask, or when overriding a disabled configuration with --allow-remote.
+2. Obtain the user's confirmation that they own the video, have permission to use it, or otherwise have a lawful basis to create a GIF from it.
+
+The rights confirmation MUST be obtained once per source, not once per clip. It is an interaction requirement: the skill MUST NOT record, store, or transmit the confirmation or any related statement.
+
+The agent MUST NOT request or accept instructions to bypass DRM, authentication, or access controls (SEC-017).
 
 ⸻
 
@@ -1344,7 +1559,8 @@ The repository MUST provide:
 * Security behavior.
 * Platform-specific notes.
 * Release notes.
-* A SECURITY.md defining supported versions, a vulnerability-reporting channel, a disclosure policy, and a summary of the security model (local-only processing, no network access, subprocess isolation, resource limits).
+* A SECURITY.md defining supported versions, a vulnerability-reporting channel, a disclosure policy, and a summary of the security model (local processing by default, opt-in download-only remote acquisition, subprocess isolation, resource limits).
+* A PRIVACY.md stating that conversion is local by default, that remote source acquisition is opt-in, disabled by default, and download-only, and that no telemetry is collected by default.
 
 ⸻
 
@@ -1497,6 +1713,8 @@ Security tests MUST verify:
 * Cancellation removes partial output.
 * A hostile local playlist file cannot trigger network access.
 * Resource limits terminate runaway conversions and clean up temporary files.
+* A signed URL is redacted from all logs, progress events, and structured results.
+* A private-network or loopback URL is blocked without explicit approval.
 
 22.5 Fuzz and property tests
 
@@ -1505,6 +1723,26 @@ The timestamp parser and manifest parsers consume untrusted input and MUST have 
 * Randomized malformed timestamp strings MUST produce structured validation errors, never uncaught exceptions.
 * Randomized malformed JSON and CSV manifests MUST produce structured validation errors.
 * Generative tests MUST use fixed seeds for reproducibility.
+
+22.6 Remote source tests
+
+Remote source tests MUST NOT depend on the public internet. They MUST use a local HTTP server bound to the loopback interface, with the loopback block of SEC-014 explicitly approved for the test fixture.
+
+Remote source tests MUST verify:
+
+* Disabled by default: a URL supplied with default configuration produces error code REMOTE_DISABLED and exit code 8 and performs no network access.
+* Direct download: with remote sources enabled, a direct media URL is downloaded, converted by the local pipeline, and the download is deleted after the job.
+* Retention: --keep-remote-source retains the download and reports its path.
+* Scheme rejection: a file URL and, when http is disallowed, an http URL produce UNSUPPORTED_URL_SCHEME without any fetch.
+* SSRF block: a URL resolving to a loopback or private address produces PRIVATE_NETWORK_BLOCKED unless the address was explicitly approved.
+* Redaction: a signed URL's query string and any embedded credentials never appear in logs, progress events, or structured results.
+* Size enforcement: a response exceeding maxDownloadBytes produces REMOTE_TOO_LARGE and leaves no partial file.
+* Timeout enforcement: a download exceeding maxDownloadSeconds produces REMOTE_DOWNLOAD_FAILED and leaves no partial file.
+* Partial-download cleanup: an interrupted or failed download leaves no residual temporary file.
+* Conversion isolation: the downloaded file is inspected and converted under the SEC-010 whitelist, and a hostile downloaded playlist cannot trigger network access.
+* yt-dlp adapter: guarded by adapter availability; when yt-dlp is absent, requesting the adapter produces YTDLP_MISSING and exit code 3.
+
+Generative tests for URL parsing MUST produce structured validation errors for malformed URLs, never uncaught exceptions.
 
 ⸻
 
@@ -1581,6 +1819,66 @@ Both Claude Code and Codex can:
 5. Interpret the structured result.
 6. Return the required summary.
 
+Version 0.2.0 acceptance criteria
+
+Version 0.2.0 additionally requires the following.
+
+AC-0.2.1: Disabled by default
+
+A remote URL supplied with default configuration is rejected with REMOTE_DISABLED and exit code 8, and no network access occurs.
+
+AC-0.2.2: Direct download and cleanup
+
+With remote sources enabled, a direct HTTPS media URL is downloaded to secure temporary storage, converted by the local pipeline into a GIF, and the download is deleted after the job.
+
+AC-0.2.3: Retained source
+
+With --keep-remote-source, the downloaded file is retained and its path is reported in the structured result.
+
+AC-0.2.4: Scheme rejection
+
+A file URL is rejected with UNSUPPORTED_URL_SCHEME and is never fetched or opened.
+
+AC-0.2.5: SSRF protection
+
+A URL resolving to a loopback or private-network address is rejected with PRIVATE_NETWORK_BLOCKED unless the specific address was explicitly approved.
+
+AC-0.2.6: Redaction
+
+A signed URL's query string and any embedded credentials never appear in logs, progress events, or structured results.
+
+AC-0.2.7: Size ceiling
+
+A download exceeding maxDownloadBytes is aborted with REMOTE_TOO_LARGE, and no partial file remains.
+
+AC-0.2.8: Timeout
+
+A download exceeding maxDownloadSeconds is aborted with REMOTE_DOWNLOAD_FAILED, and no partial file remains.
+
+AC-0.2.9: Partial-download cleanup
+
+An interrupted or failed download leaves no residual temporary file.
+
+AC-0.2.10: Optional yt-dlp adapter
+
+When yt-dlp is present and requested, a video-page URL is acquired; when yt-dlp is absent, requesting the adapter yields YTDLP_MISSING with exit code 3. The adapter is never bundled.
+
+AC-0.2.11: DRM rejection
+
+A DRM-protected source is rejected with DRM_PROTECTED and exit code 5, with no circumvention attempted.
+
+AC-0.2.12: Rights confirmation
+
+The agent obtains a lawful-basis confirmation once per source before acquisition, and the skill records nothing.
+
+AC-0.2.13: Conversion isolation
+
+The downloaded file is inspected and converted under the SEC-010 protocol whitelist, and a hostile downloaded playlist cannot trigger network access.
+
+AC-0.2.14: Backward compatibility
+
+All version 0.1.0 command-line invocations, configuration, and local behavior are unchanged.
+
 ⸻
 
 24. Versioning policy
@@ -1605,9 +1903,10 @@ A product major-version change does not automatically require a schema-version c
 
 Version	Status	Description
 0.1.0-draft.1	Superseded	Initial implementation specification
-0.1.0-draft.2	Current	Adds FFmpeg network isolation (SEC-010), resource limits (SEC-011), exit code 13, --output-name flag, duration and loop syntax rules, marketplace metadata (21.5), fuzz tests (22.5), mandatory CI matrix, named validation tooling
-0.1.0-rc.1	Planned	Updated after prototype and architecture review
-0.1.0	Planned	Approved specification for first stable implementation
+0.1.0-draft.2	Ratified	Ratified and shipped as product 0.1.0. Adds FFmpeg network isolation (SEC-010), resource limits (SEC-011), exit code 13, --output-name flag, duration and loop syntax rules, marketplace metadata (21.5), fuzz tests (22.5), mandatory CI matrix, named validation tooling
+0.1.0-rc.1	Not issued	Release-candidate stage folded into the product 0.1.0 release; the specification shipped directly from 0.1.0-draft.2
+0.1.0	Released	Product 0.1.0 released from specification 0.1.0-draft.2
+0.2.0-draft.1	Current	Adds remote source acquisition: FR-018 through FR-023, SEC-012 through SEC-017, exit code 14, remoteSources and keepRemoteSource configuration, limits.maxDownloadBytes and limits.maxDownloadSeconds, --allow-remote / --keep-remote-source / --remote-adapter flags, download progress events, rights-confirmation interaction (19.6), remote testing (22.6) and version 0.2.0 acceptance criteria (section 23)
 
 ⸻
 
@@ -1630,18 +1929,18 @@ Includes:
 
 25.2 Version 0.2.0 — Remote acquisition
 
-Planned capabilities:
+Version 0.2.0 is specified normatively by FR-018 through FR-023, SEC-012 through SEC-017, exit code 14, the remoteSources and keepRemoteSource configuration fields, the limits.maxDownloadBytes and limits.maxDownloadSeconds fields, section 19.6, section 22.6, and the version 0.2.0 acceptance criteria in section 23.
 
-* Direct HTTP and HTTPS media URLs.
-* Optional yt-dlp integration.
-* Temporary local downloads.
-* Download progress.
-* Source cleanup.
-* Credential redaction.
-* Explicit network approval.
-* Public and signed cloud URLs.
+Capabilities:
 
-Authenticated provider integrations remain separate from general URL support.
+* Direct HTTP and HTTPS media URLs, including public and signed cloud URLs (FR-019).
+* Optional, never-bundled yt-dlp adapter for video-page URLs (FR-022).
+* Download to secure temporary storage, local conversion, and source cleanup (FR-020).
+* Download progress events (FR-023).
+* Credential and token redaction (SEC-015).
+* Explicit, opt-in network enablement and per-source rights confirmation (FR-018, section 19.6).
+
+Remote acquisition is disabled by default. Authenticated provider integrations remain out of scope and separate from general URL support (section 3.3).
 
 25.3 Version 0.3.0 — Transformations
 

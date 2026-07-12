@@ -14,17 +14,21 @@ validating timestamps, inspecting media, planning outputs, running FFmpeg's
 two-pass palette pipeline, and returning structured results. It never prompts.
 
 > Normative specification: [`versioned_technical_spec.md`](versioned_technical_spec.md)
-> (VTG-TS-001, v0.1.0-draft.2). When this README and the spec disagree, the spec wins.
+> (VTG-TS-001, v0.2.0-draft.1). When this README and the spec disagree, the spec wins.
 
-## Status: pre-release (0.1.0, in development)
+## Status: 0.1.0 released; 0.2.0 in development
 
-This repository is at release-candidate stage for 0.1.0. Interfaces described
-here track the spec but are **not yet stable**. A few items remain open
-decisions (exact profile values and others — spec §26). Do not treat 0.1.0 as
-production-ready until it is tagged and published.
+Version 0.1.0 is released. **Version 0.2.0 — opt-in remote source acquisition —
+is in development on this branch**; its interfaces track the spec but are **not
+yet stable**, and a few items remain open decisions (exact profile values and
+others — spec §26). Do not treat 0.2.0 as production-ready until it is tagged and
+published.
 
-Version **0.1.0 processes local files only** — it performs no network access.
-Remote source acquisition is planned for 0.2.0 (spec §25.2).
+Conversion is **local by default**. Version 0.2.0 adds **opt-in, download-only**
+remote source acquisition (direct `http`/`https` media URLs, plus an optional
+never-bundled yt-dlp adapter for video-page URLs). It is **disabled by default**:
+with the default configuration a URL is rejected with `REMOTE_DISABLED` and no
+network access occurs (spec §25.2, FR-018). See [Remote sources](#remote-sources-opt-in).
 
 ## Requirements
 
@@ -91,7 +95,7 @@ lives); from the repository root, prefix the path with
 `src/skill/video-to-gif/`.
 
 With `--json`, the final JSON document is written to **stdout** and progress
-events stream as JSON Lines on **stderr** (spec §13.3). Exit codes `0`–`13` are
+events stream as JSON Lines on **stderr** (spec §13.3). Exit codes `0`–`14` are
 part of the contract (spec §14).
 
 ### Check the environment
@@ -180,6 +184,35 @@ Timestamps accept `75`, `75.5`, `MM:SS`, `HH:MM:SS`, each with optional `.mmm`
 fractional seconds. A clip is defined by `start` plus exactly one of `end` or
 `duration`.
 
+### Remote sources (opt-in)
+
+Remote acquisition is **disabled by default**. Set `remoteSources` to `ask` or
+`enabled` in `.video-to-gif.json`, or pass `--allow-remote` to enable it for a
+single invocation. With the default configuration a URL is rejected with
+`REMOTE_DISABLED` (exit 8) and no network access occurs.
+
+Before fetching, the agent obtains your approval for network access and a
+one-per-source confirmation that you have a lawful basis to use the video. The
+source is downloaded to a secure temporary directory, converted by the local
+pipeline, and the download is deleted afterward unless you pass
+`--keep-remote-source`. `https` is preferred (`http` warns; other schemes are
+rejected), and any URL echoed in output has its query string and credentials
+redacted (spec §12.8, FR-018..023).
+
+```
+python scripts/video_to_gif.py create \
+  --input "https://cdn.example.com/media/demo.mp4" \
+  --start "00:01:00" \
+  --end "00:01:05" \
+  --profile balanced \
+  --allow-remote \
+  --json
+```
+
+Video-page (watch) URLs require the optional, never-bundled `yt-dlp` adapter via
+`--remote-adapter ytdlp`; when it is absent the engine reports `YTDLP_MISSING`
+(exit 3). See [`references/remote-sources.md`](src/skill/video-to-gif/references/remote-sources.md).
+
 ## Quality profiles
 
 Widths are **maximums**, not forced widths. The engine preserves source aspect
@@ -198,18 +231,23 @@ target, the effective frame rate does not exceed the source (spec §8, FR-014).
 
 ## Security model (summary)
 
-Version 0.1.0 is designed to be safe on untrusted media and hostile manifests.
+The skill is designed to be safe on untrusted media and hostile manifests.
 Full detail: [`docs/security.md`](docs/security.md) and [`SECURITY.md`](SECURITY.md).
 
-- **Local-only processing.** No source video, GIF, frame, metadata, or filename
-  is uploaded anywhere. Telemetry is disabled (spec §18).
-- **No network access in 0.1.0.** A URL source returns `UNSUPPORTED_REMOTE_SOURCE`
-  rather than being fetched (SEC-005).
+- **Local by default; nothing uploaded.** No source video, GIF, frame, metadata,
+  or filename is uploaded anywhere. Telemetry is disabled (spec §18).
+- **Opt-in, download-only remote sources (0.2.0).** Remote acquisition is
+  disabled by default; with defaults a URL returns `REMOTE_DISABLED` (exit 8) and
+  no network access occurs. When enabled and approved, access is download-only:
+  only `https`/`http` schemes are allowed (others rejected as
+  `UNSUPPORTED_URL_SCHEME`), private-network/loopback/metadata hosts are blocked
+  (`PRIVATE_NETWORK_BLOCKED`), downloads are size- and time-capped (2 GiB /
+  900 s), and URLs are redacted in all output (SEC-012..SEC-017).
 - **Network isolation enforced at the FFmpeg layer.** `ffmpeg`/`ffprobe` are
   invoked with `-protocol_whitelist file,pipe`, and reference-following
   containers (HLS, DASH, concat scripts) are rejected as
-  `UNSUPPORTED_MEDIA_CONTAINER` (exit 5) so a hostile local playlist cannot reach
-  the network (SEC-010).
+  `UNSUPPORTED_MEDIA_CONTAINER` (exit 5) so a hostile local playlist — or a
+  downloaded file — cannot reach the network (SEC-010).
 - **No shell.** Subprocesses are invoked with argument arrays, never
   `shell=True`; manifest and config values are treated purely as data (SEC-001,
   SEC-009).

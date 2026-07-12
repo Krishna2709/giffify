@@ -429,12 +429,20 @@ class TestAcceptance(EngineTestCase):
 
     # -- AC-013 ------------------------------------------------------------
     def test_ac_013_local_only_behavior(self):
-        """AC-013: Version 0.1.0 performs no network access."""
+        """AC-013: no network access by default.
+
+        The v0.1.0 criterion ("performs no network access") remains true in
+        v0.2.0 because remote source acquisition is disabled by default (FR-018).
+        A URL supplied with the default configuration is now rejected with
+        REMOTE_DISABLED / exit 8 (v0.1.0 reported UNSUPPORTED_REMOTE_SOURCE /
+        exit 5); either way the engine makes no network connection and writes no
+        output -- the guarantee the criterion asserts.
+        """
         lis = _Listener()
         self.addCleanup(lis.close)
         res = self.run_engine(["create", "--input", lis.url(), "--start", "0", "--end", "1"])
-        self.assert_exit(res, 5)  # EXIT_INVALID_MEDIA
-        self.assert_error_code(res, "UNSUPPORTED_REMOTE_SOURCE")
+        self.assert_exit(res, 8)  # EXIT_PERMISSION (remote disabled)
+        self.assert_error_code(res, "REMOTE_DISABLED")
         self.assertFalse(lis.connected.is_set(), "engine attempted a network connection")
         self.assertEqual(self.list_output(), [])
 

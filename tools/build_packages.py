@@ -50,7 +50,7 @@ from pathlib import Path
 
 SKILL_NAME = "video-to-gif"
 PLUGIN_DESCRIPTION = "Generate optimized animated GIFs from explicit video timestamp ranges."
-PLUGIN_VERSION = "0.1.0"
+PLUGIN_VERSION = "0.2.0"
 PLUGIN_AUTHOR = {"name": "Krishna2709", "url": "https://github.com/Krishna2709"}
 
 # Media files are a contamination signal: they must never appear in the
@@ -232,8 +232,9 @@ package wraps the portable `video-to-gif` Agent Skill for {platform_title}.
   (`pip install ffmpeg` is NOT FFmpeg)
 
 The skill itself lives under `skills/video-to-gif/` (SKILL.md plus the
-deterministic Python engine, references, and JSON schemas). Version 0.1.0
-processes local video files only and performs no network access; see
+deterministic Python engine, references, and JSON schemas). Conversion is local
+by default; version 0.2.0 adds opt-in, download-only remote source acquisition
+that is disabled by default and gated by explicit enablement/approval. See
 `skills/video-to-gif/references/` and the repository's SECURITY.md for the
 security model.
 

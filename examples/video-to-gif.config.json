@@ -8,8 +8,11 @@
   "keepTemporaryFiles": false,
   "allowOutsideProject": false,
   "remoteSources": "disabled",
+  "keepRemoteSource": false,
   "limits": {
     "maxClipProcessingSeconds": 600,
-    "maxTemporaryBytes": 2147483648
+    "maxTemporaryBytes": 2147483648,
+    "maxDownloadBytes": 2147483648,
+    "maxDownloadSeconds": 900
   }
 }

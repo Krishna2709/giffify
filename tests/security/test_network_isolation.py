@@ -115,14 +115,18 @@ class TestRemoteUrls(EngineTestCase):
         pass
 
     def test_http_url_rejected_as_remote_no_fetch(self):
-        # SEC-005/AC-013: URL input -> UNSUPPORTED_REMOTE_SOURCE, never fetched.
+        # v0.2.0 FR-018: with remote sources disabled by default, a URL input is
+        # rejected with REMOTE_DISABLED / exit 8 and is never fetched. (v0.1.0
+        # reported UNSUPPORTED_REMOTE_SOURCE / exit 5; the spec supersedes it. The
+        # security-critical property -- no network connection -- is unchanged.)
         lis = _Listener()
         self.addCleanup(lis.close)
         res = self.run_engine(
             ["create", "--input", lis.url("/v.mp4"), "--start", "0", "--end", "1"]
         )
-        self.assert_exit(res, 5)  # EXIT_INVALID_MEDIA
-        self.assert_error_code(res, "UNSUPPORTED_REMOTE_SOURCE")
+        self.assert_exit(res, 8)  # EXIT_PERMISSION
+        self.assert_error_code(res, "REMOTE_DISABLED")
+        self.assert_status(res, "remote_disabled")
         self.assertFalse(lis.connected.is_set())
         self.assertEqual(self.list_output(), [])
 
@@ -130,40 +134,43 @@ class TestRemoteUrls(EngineTestCase):
         res = self.run_engine(
             ["create", "--input", "https://example.invalid/v.mp4", "--start", "0", "--end", "1"]
         )
-        self.assert_exit(res, 5)
-        self.assert_error_code(res, "UNSUPPORTED_REMOTE_SOURCE")
+        self.assert_exit(res, 8)
+        self.assert_error_code(res, "REMOTE_DISABLED")
 
     def test_file_url_rejected_without_fetch(self):
         # Security-critical property (holds): a file:// input is rejected with a
-        # non-zero exit and no network activity. (The specific error code differs
-        # from UNSUPPORTED_REMOTE_SOURCE -- see the expected-failure test below.)
+        # non-zero exit and no network/filesystem activity. Under v0.2.0's
+        # enablement-first gate a URL supplied while remote is disabled reports
+        # REMOTE_DISABLED (status remote_disabled) before the scheme is inspected.
         res = self.run_engine(
             ["create", "--input", "file:///no/such/local/file.mp4", "--start", "0", "--end", "1"]
         )
         self.assertNotEqual(res.returncode, 0)
-        self.assert_status(res, "failed")
+        self.assert_status(res, "remote_disabled")
         self.assertEqual(self.list_output(), [])
 
-    def test_file_url_reported_as_unsupported_remote_source(self):
-        """BUG-001 fixed: file:// URL is classified as a remote source.
+    def test_file_url_reported_as_remote_disabled(self):
+        """A file:// URL is a URL, so the enablement gate fires first (v0.2.0).
 
-        Spec SEC-005 requires that *a URL* supplied to v0.1.0 produces an
-        UNSUPPORTED_REMOTE_SOURCE result. ``vtg.paths.reject_if_remote`` now
-        rejects *any* ``scheme://`` input — including ``file://`` — so
-        ``paths.resolve_source_path`` short-circuits before touching the
-        filesystem and the engine returns UNSUPPORTED_REMOTE_SOURCE (exit 5)
-        rather than treating ``file:///...`` as a (non-existent) local path.
+        In v0.1.0 ``reject_if_remote`` rejected *any* ``scheme://`` input --
+        including ``file://`` -- with UNSUPPORTED_REMOTE_SOURCE (exit 5). In
+        v0.2.0 the remote-enablement gate (FR-018) is the outermost check: a URL
+        supplied while remote sources are disabled produces REMOTE_DISABLED
+        (exit 8) before the scheme allowlist (SEC-013) is consulted. The
+        filesystem is never touched and no network access occurs. (When remote is
+        enabled, a file:// URL is then rejected with UNSUPPORTED_URL_SCHEME; that
+        path is covered by the remote unit suite.)
 
         Repro:
             python3 scripts/video_to_gif.py create \\
               --input 'file:///no/such/file.mp4' --start 0 --end 1 --json
-          per SEC-005: error.code == UNSUPPORTED_REMOTE_SOURCE, exit 5
+          per FR-018: error.code == REMOTE_DISABLED, exit 8
         """
         res = self.run_engine(
             ["create", "--input", "file:///no/such/local/file.mp4", "--start", "0", "--end", "1"]
         )
-        self.assert_exit(res, 5)
-        self.assert_error_code(res, "UNSUPPORTED_REMOTE_SOURCE")
+        self.assert_exit(res, 8)
+        self.assert_error_code(res, "REMOTE_DISABLED")
 
 
 class TestResourceLimits(EngineTestCase):

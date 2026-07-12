@@ -45,6 +45,17 @@ def _url_scheme(value: str) -> str | None:
     return m.group("scheme").lower()
 
 
+def url_scheme(value: str) -> str | None:
+    """Return the lowercased URL scheme of a ``scheme://`` input, else None.
+
+    Unlike :func:`is_url`, this reports *every* scheme including ``file`` so the
+    remote-source gate (FR-018) can route any URL through enablement first and
+    the scheme allowlist (SEC-013) second. A Windows drive letter (``C:\\``) is
+    not a URL and yields None.
+    """
+    return _url_scheme(value)
+
+
 def is_url(value: str) -> bool:
     """Return True if ``value`` looks like a remote URL (SEC-005).
 

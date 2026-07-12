@@ -62,6 +62,32 @@ sudo dnf install ffmpeg
 
 (On some minimal distributions `ffmpeg` and `ffprobe` may be split across packages; install both if `doctor` still reports `ffprobe` missing.)
 
+## Optional: `yt-dlp` (video-page remote URLs only)
+
+`yt-dlp` is an **optional** adapter, needed **only** to acquire video-platform watch-page URLs with `--remote-adapter ytdlp` (spec FR-022). It is **not required** for the skill's core functionality, for local files, or for direct `http`/`https` media URLs. It is **never bundled** with the skill, is detected independently of FFmpeg, and its absence is not a failure — `doctor` reports it as informational and reports its version when present.
+
+Install it only when the user asks to convert a video-page URL, and only with the same approval-first flow as FFmpeg: state that yt-dlp is missing, explain it is needed for the video-page URL, show the command below for the user's platform, and ask before running it. Remote acquisition still requires `remoteSources` to be enabled/approved and a per-source rights confirmation (see `references/remote-sources.md`).
+
+macOS (Homebrew):
+
+```
+brew install yt-dlp
+```
+
+Windows (winget):
+
+```
+winget install yt-dlp.yt-dlp
+```
+
+Cross-platform (pip — this installs the real `yt-dlp` program, unlike `pip install ffmpeg`):
+
+```
+python -m pip install --upgrade yt-dlp
+```
+
+Linux distributions also package it (for example `sudo apt install yt-dlp` or `sudo dnf install yt-dlp`); pipx (`pipx install yt-dlp`) is another option. After installing, confirm with `python scripts/video_to_gif.py doctor --json`, which reports yt-dlp availability and version.
+
 ## Verifying
 
 After installing, verify with the doctor command:
@@ -70,4 +96,4 @@ After installing, verify with the doctor command:
 python scripts/video_to_gif.py doctor --json
 ```
 
-`doctor` confirms that `ffmpeg` and `ffprobe` are executable, that the `palettegen` and `paletteuse` filters exist, that GIF encoding is available, and that the temporary directory (and any supplied output directory) is writable. If it still reports a missing dependency, ensure the executable is on your `PATH` and start a new terminal session.
+`doctor` confirms that `ffmpeg` and `ffprobe` are executable, that the `palettegen` and `paletteuse` filters exist, that GIF encoding is available, and that the temporary directory (and any supplied output directory) is writable. It also reports whether the optional `yt-dlp` adapter is available and, when present, its version. If it still reports a missing required dependency, ensure the executable is on your `PATH` and start a new terminal session.

@@ -45,12 +45,18 @@
       "type": "boolean"
     },
     "remoteSources": {
-      "description": "Remote source policy. Fixed at 'disabled' in v0.1.0; remote acquisition is a v0.2.0 feature.",
+      "description": "Remote source acquisition policy (spec FR-018, section 9.5). 'disabled' (default) rejects remote URLs with REMOTE_DISABLED (exit 8) and performs no network access; 'ask' requires explicit user approval before each remote acquisition; 'enabled' permits remote acquisition without a per-request prompt. Enablement alone does not authorize private-network addresses or bypass the URL scheme allowlist.",
       "type": "string",
-      "enum": ["disabled"]
+      "enum": ["disabled", "ask", "enabled"],
+      "default": "disabled"
+    },
+    "keepRemoteSource": {
+      "description": "When true, a downloaded remote source is retained after the job and its path is reported in the structured result. Disabled by default. Equivalent to the --keep-remote-source flag (spec FR-020, section 9.5).",
+      "type": "boolean",
+      "default": false
     },
     "limits": {
-      "description": "Resource-safety limits (spec SEC-011).",
+      "description": "Resource-safety and download limits (spec SEC-011, FR-021, section 9.5).",
       "type": "object",
       "properties": {
         "maxClipProcessingSeconds": {
@@ -60,10 +66,22 @@
           "default": 600
         },
         "maxTemporaryBytes": {
-          "description": "Ceiling on temporary-disk usage per job, in bytes. Default 2147483648 (2 GiB). Exceeding it fails with RESOURCE_LIMIT_EXCEEDED (exit 13).",
+          "description": "Ceiling on temporary-disk usage per job, in bytes. Default 2147483648 (2 GiB). Exceeding it fails with RESOURCE_LIMIT_EXCEEDED (exit 13). Remote downloads count toward this accounting.",
           "type": "integer",
           "minimum": 1,
           "default": 2147483648
+        },
+        "maxDownloadBytes": {
+          "description": "Maximum size of a single remote download, in bytes, enforced on bytes actually received during streaming (not on a declared Content-Length). Default 2147483648 (2 GiB). Exceeding it fails with REMOTE_TOO_LARGE (exit 13) and leaves no partial file. Remote acquisition only (v0.2.0).",
+          "type": "integer",
+          "minimum": 1,
+          "default": 2147483648
+        },
+        "maxDownloadSeconds": {
+          "description": "Download wall-clock timeout in seconds. Default 900. Exceeding it aborts the download with REMOTE_DOWNLOAD_FAILED (exit 14) and leaves no partial file. Remote acquisition only (v0.2.0).",
+          "type": "integer",
+          "minimum": 1,
+          "default": 900
         }
       }
     }
