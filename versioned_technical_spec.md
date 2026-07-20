@@ -816,9 +816,9 @@ Upscaling:
 Dimension parity:
 
 * An explicitly supplied width or height MUST be honored exactly, including odd values. GIF is a palette-based format without chroma subsampling, so it imposes no even-dimension constraint, and rounding an explicit bound would silently contradict the user's request.
-* When width or height is explicitly supplied, a dimension derived from that bound MUST be rounded to an even value.
-* When neither width nor height is supplied, dimension derivation is unchanged from version 0.1.0, which rounds to the nearest integer and MAY therefore produce an odd dimension. Profile-only invocations MUST produce byte-comparable output to version 0.2.0; this rule takes precedence over the even-rounding rule above, which applies only to the explicit-bound path.
-* No output dimension may be smaller than 2.
+* A dimension derived from another dimension MUST be rounded to the nearest integer and MAY therefore be odd. No even-rounding is applied, for the same reason explicit bounds are honored exactly: GIF imposes no even-dimension constraint, so rounding to even would alter output that earlier versions produced correctly.
+* Dimension derivation is therefore unchanged from version 0.1.0 on every path — profile-only, width-only, height-only, and both-bounds. Every version 0.1.0 and version 0.2.0 invocation MUST produce byte-comparable output under version 0.3.0 (NFR-006).
+* No output dimension may be smaller than 2. When a requested bound is at the minimum of 2 and the effective source aspect ratio would derive a companion dimension below 2, the floor of 2 takes precedence over exact aspect-ratio preservation, since both cannot hold.
 
 The resolved dimensions MUST be deterministic for the same source, crop, profile, and bounds (NFR-002) and MUST be reported (FR-030).
 
@@ -2257,7 +2257,7 @@ Unit tests MUST cover:
 * Dimension resolution when only width is given, only height is given, and both are given, verifying that the both-given case fits inside the box and preserves the aspect ratio.
 * Explicit dimensions overriding a profile maximum width in both directions.
 * Upscale gating: without allowUpscale the output is clamped to the effective source dimensions and the UPSCALE_NOT_ALLOWED warning is emitted; with allowUpscale the requested dimensions are honored.
-* Dimension parity: an explicitly supplied odd bound is honored exactly, an automatically derived dimension remains even, and the profile-only path produces the same dimensions as version 0.2.0.
+* Dimension parity: an explicitly supplied odd bound is honored exactly, a derived dimension is rounded to the nearest integer and may be odd, and every path — profile-only, width-only, height-only, and both-bounds — produces the same dimensions as version 0.2.0.
 * Speed parsing and rejection for 0, negative values, values below 0.25, values above 4.0, non-numeric values, exponent notation, and more than three fractional digits, each producing INVALID_SPEED.
 * Speed duration arithmetic: outputDurationMs equals round(durationMs / speed) for representative multipliers.
 * Dither enum validation, including rejection of an unknown mode, of a bayerScale outside 0 through 5, and of a bayerScale supplied with a non-bayer mode, each producing INVALID_DITHER.

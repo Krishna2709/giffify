@@ -16,14 +16,21 @@ two-pass palette pipeline, and returning structured results. It never prompts.
 > Normative specification: [`versioned_technical_spec.md`](versioned_technical_spec.md)
 > (VTG-TS-001, v0.3.0-draft.1). When this README and the spec disagree, the spec wins.
 
-## Status: 0.2.0 released; 0.3.0 in development
+## Status: 0.3.0 release candidate
 
 Versions 0.1.0 and 0.2.0 are released. **Version 0.3.0 — transformations
-(crop, explicit resize, playback speed, dithering) and PNG preview frames — is in
-development on this branch**; its interfaces track the spec but are **not yet
-stable**, and a few items remain open decisions (exact profile values and
-others — spec §26). Do not treat 0.3.0 as production-ready until it is tagged and
-published.
+(crop, explicit resize, playback speed, dithering) and PNG preview frames — is
+feature-complete and pinned at `0.3.0` throughout this repository, awaiting its
+release tag.** Its CLI flags, schemas, and exit codes are settled and are what
+the spec describes; a few non-interface items remain open decisions (exact
+profile values and others — spec §26). Until the `v0.3.0` tag is published,
+install from this branch expecting the released artifact to match it, not to
+differ from it.
+
+Upgrading from 0.1.0/0.2.0 is safe: 0.3.0 changes no output. Every earlier
+invocation produces byte-comparable GIFs, verified by executing the released
+0.2.0 engine alongside 0.3.0. The one rejected-input change is that a manifest
+`width` outside 2–8192 is now an error; see [`CHANGELOG.md`](CHANGELOG.md).
 
 Conversion is **local by default**. Version 0.2.0 added **opt-in, download-only**
 remote source acquisition (direct `http`/`https` media URLs, plus an optional
@@ -314,8 +321,10 @@ target, the effective frame rate does not exceed the source (spec §8, FR-014).
 An explicit `--width` or `--height` **overrides** the profile's maximum width — a
 profile maximum is a default bound, not a ceiling on explicit requests — and is
 honored exactly, odd values included (GIF is palette-based, so there is no
-even-dimension constraint); a dimension *derived* from an explicit bound is
-rounded to even. Upscaling stays gated by `--allow-upscale`; without it an
+even-dimension constraint); a dimension *derived* from another is rounded to the
+nearest integer and may itself be odd — the same rule 0.1.0 used, on every path,
+so derived dimensions are unchanged from 0.1.0/0.2.0. Upscaling stays gated by
+`--allow-upscale`; without it an
 oversized request is clamped back to the effective source size and warns with
 `UPSCALE_NOT_ALLOWED`. Profile dither defaults reproduce 0.1.0/0.2.0 output, so a
 job that specifies no dither is unchanged from earlier releases (spec §15.5).

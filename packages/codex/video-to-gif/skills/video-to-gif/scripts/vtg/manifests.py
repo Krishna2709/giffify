@@ -69,6 +69,12 @@ _CSV_KNOWN = {
     "bayerscale",
 }
 
+# Transformation fields that already existed in version 0.2.0 and were parsed
+# there with ``int(str(value).strip())``. A whitespace-padded JSON string was
+# therefore valid, and must stay valid (NFR-006). Fields new in 0.3.0 are not
+# listed: they have no legacy leniency to preserve.
+_LEGACY_LENIENT_FIELDS = frozenset({"width"})
+
 
 @dataclass
 class Manifest:
@@ -290,12 +296,23 @@ def _parse_transform_fields(
     value means "not specified at this level", so the next precedence level
     applies (FR-024). Invalid values raise the FR-025..FR-028 error codes with
     exit code 6.
+
+    Surrounding whitespace is stripped from ``width`` and ``height`` strings
+    before the grammar runs: version 0.2.0 parsed both with
+    ``int(str(value).strip())``, so a padded value such as ``" 480"`` was
+    accepted, and rejecting it now would break existing manifests (NFR-006).
+    Only the padding is forgiven -- the strict grammar of FR-026 still runs on
+    the trimmed text, so inner whitespace and every non-digit character are
+    still rejected. Fields introduced in 0.3.0 have no such legacy and stay
+    strict in JSON; CSV cells are trimmed for every column by the CSV reader.
     """
 
     def parse(key: str, parser: Any) -> Any:
         raw = values.get(key)
         if not _present(raw):
             return None
+        if key in _LEGACY_LENIENT_FIELDS and isinstance(raw, str):
+            raw = raw.strip()
         path = f"{field_prefix}.{key}" if field_prefix else key
         return parser(raw, field_path=path, clip_index=clip_index)
 
@@ -427,12 +444,23 @@ def parse_csv_manifest(raw: str) -> Manifest:
         raise _manifest_error("CSV manifest must include an 'end' or 'duration' column.", "$")
 
     def get(row: list[str], col: str) -> str | None:
+        """Return a cell's text with surrounding whitespace stripped.
+
+        Trimming happens for every column uniformly, before any grammar runs.
+        start/end/duration/profile/fps/colors/loop have always tolerated a
+        padded cell (``str(value).strip()`` downstream), and the transformation
+        columns must behave the same way -- a leading space in a spreadsheet
+        export is a formatting artifact, not a value. This opens no injection
+        surface: the strict FR-025..FR-028 grammars still run on the trimmed
+        text, so inner whitespace, newlines, and every character outside each
+        grammar remain rejected (SEC-018).
+        """
         if col not in header:
             return None
         idx = header.index(col)
         if idx >= len(row):
             return None
-        return row[idx]
+        return row[idx].strip()
 
     clips: list[models.ClipSpec] = []
     clip_index = 0

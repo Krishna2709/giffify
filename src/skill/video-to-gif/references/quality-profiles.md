@@ -28,7 +28,7 @@ A profile's maximum width is a **default bound**, not a ceiling on explicit requ
 - An explicit `width` or `height` — from a flag, a manifest field, or `transformations` in configuration — replaces the profile's maximum width entirely. `--profile small --width 900` produces a 900px-wide GIF at the `small` profile's frame rate and colour count.
 - Both are integers in the closed range **2 to 8192**; anything else is `INVALID_DIMENSIONS` (exit 6).
 - Supplying both bounds fits the frame inside that box: output width ≤ `width` **and** output height ≤ `height`, aspect ratio preserved. The frame is never stretched.
-- An explicitly supplied bound is honored **exactly, including odd values** — GIF is palette-based and has no even-dimension constraint. A dimension *derived* from an explicit bound is rounded to an even value. When neither bound is supplied, derivation is unchanged from 0.1.0 and may produce an odd dimension.
+- An explicitly supplied bound is honored **exactly, including odd values** — GIF is palette-based and has no even-dimension constraint. A *derived* dimension is rounded to the **nearest integer** and may itself be odd. That one rule applies on every path, and it is the rule 0.1.0 used, so derived dimensions are unchanged from 0.1.0/0.2.0.
 - Upscaling stays gated by `--allow-upscale`. Without it, a resolved size larger than the effective source is clamped back to the source size, and the `UPSCALE_NOT_ALLOWED` warning is emitted **only** when the clamped bound was explicitly supplied — a profile maximum that simply exceeds a small source never warns.
 - When a crop is applied, all of the above is evaluated against the **cropped** rectangle, not the original frame.
 

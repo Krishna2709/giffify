@@ -109,9 +109,11 @@ A profile maximum width is a *default* bound, not a ceiling on explicit requests
 
 ### Odd values are honored exactly
 
-- An explicitly supplied `width` or `height` is honored **exactly, including odd values**. GIF is a palette-based format with no chroma subsampling, so it imposes no even-dimension constraint, and rounding an explicit bound would silently contradict the request. `--width 641` yields a 641px-wide GIF.
-- A dimension **derived** from an explicit bound is rounded to an even value. `--width 641` on a 1920x1080 source gives `641x360`.
-- When neither bound is supplied, derivation is unchanged from 0.1.0 and may produce an odd dimension. Profile-only jobs are byte-comparable with earlier versions.
+GIF is a palette-based format with no chroma subsampling, so it imposes **no even-dimension constraint**. Nothing here is ever rounded to an even value.
+
+- An explicitly supplied `width` or `height` is honored **exactly, including odd values**. Rounding an explicit bound would silently contradict the request. `--width 641` yields a 641px-wide GIF.
+- A **derived** dimension is rounded to the **nearest integer** and may itself be odd. `--width 641` on a 1920x1080 source gives `641x338` (1080 × 641 / 1920 = 338.06); `--height 301` on the same source gives `535x301` (1920 × 301 / 1080 = 535.19).
+- This is one rule on **every** path — `width` only, `height` only, both, and neither — and it is the rule 0.1.0 used. Derived dimensions are therefore unchanged from 0.1.0/0.2.0, and every earlier invocation stays byte-comparable. A 1000x502 source at `--width 320` gives `320x161` in 0.1.0, 0.2.0, and 0.3.0 alike.
 - No output dimension is ever smaller than 2.
 
 ### Upscaling

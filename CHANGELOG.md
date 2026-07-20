@@ -92,21 +92,38 @@ Captions and subtitle burn-in are deliberately excluded and deferred to 0.4.0
 
 ### Changed
 
-- **No breaking changes.** Every 0.1.0 and 0.2.0 invocation behaves exactly as it
-  did: with no transformation specified, output is functionally equivalent to
-  0.2.0 for the same source, range, profile, and configuration. `--width` keeps
-  its 0.1.0 meaning as a maximum output width. Configuration, manifest, and
+- **Output dimensions are unchanged.** Every 0.1.0 and 0.2.0 invocation produces
+  the same GIF it did: with no transformation specified, output is
+  byte-comparable to 0.2.0 for the same source, range, profile, and
+  configuration. `--width` keeps its 0.1.0 meaning as a maximum output width, and
+  its derived height is unchanged. This was verified by executing the released
+  0.2.0 engine and 0.3.0 side by side over profile-only, `--width`, and manifest
+  `width` invocations across several source geometries and comparing both the
+  reported dimensions and the produced GIF bytes. Configuration, manifest, and
   structured result schema versions all remain `1`, and no new exit code is
   introduced — invalid transformations reuse exit 6 (`INVALID_CROP`,
   `INVALID_DIMENSIONS`, `INVALID_SPEED`, `INVALID_DITHER`), a `preview
   --output-name` with a non-`.png` extension reuses exit 2 (`INVALID_USAGE`), and
   a preview collision reuses exit 7.
-- **Explicit dimension bounds are honored exactly, odd values included.** GIF is
-  a palette-based format without chroma subsampling, so it imposes no
-  even-dimension constraint and rounding an explicit bound would silently
-  contradict the request. Only a dimension *derived* from an explicit bound is
-  rounded to even; the profile-only path is unchanged from 0.1.0/0.2.0 and
-  remains byte-comparable.
+- **Dimension parity, stated exactly** (spec FR-026). An explicitly supplied
+  `width`/`height` is honored exactly, odd values included: GIF is a palette-based
+  format without chroma subsampling, so it imposes no even-dimension constraint
+  and rounding an explicit bound would silently contradict the request. A
+  *derived* dimension is rounded to the nearest integer and may itself be odd —
+  the same rule 0.1.0 used, on every path (profile-only, width-only,
+  height-only, and both-bounds). No even-rounding is applied anywhere.
+- **Manifest `width` is now range-checked (rejected-input change).** FR-026
+  requires both dimension bounds to be integers in the closed range 2–8192, and
+  that check applies to the manifest `width` field, which existed in 0.1.0. A
+  manifest carrying `width: 1` or `width: 10000` was accepted by 0.2.0 and is now
+  rejected with `INVALID_DIMENSIONS` and exit 6. No previously *accepted output*
+  changes — a value in 2–8192 behaves exactly as before — but a manifest relying
+  on an out-of-range width will need that value corrected. Whitespace-padded
+  values such as `" 480"` are unaffected and still accepted: a CSV cell is
+  trimmed before validation in every column, and a JSON manifest `width` string
+  is trimmed exactly as 0.2.0 trimmed it. Fields introduced in 0.3.0 (`height`,
+  `crop`, `speed`, `dither`, `bayerScale`) have no such legacy, so in JSON they
+  take the strict grammar with no padding allowed.
 - **Dithering is now a public option.** The 0.1.0 allowance to change dithering
   internally is superseded: an explicitly requested mode and `bayerScale` are
   honored exactly and will not change across patch releases, while a *profile's*
@@ -124,10 +141,19 @@ Captions and subtitle burn-in are deliberately excluded and deferred to 0.4.0
   graph is built exclusively from values the engine re-serializes from its own
   validated numeric and enum types — user-supplied text is never concatenated
   into a filter graph. Any value containing a character outside its grammar is
-  rejected — this covers at least whitespace, newline, and the characters
-  ``, ; ' " \ [ ] = % ( ) $ ` *``. The colon is permitted only as the field
-  separator inside `--crop`,
-  which must contain exactly three colons and four unsigned integer fields. The
+  rejected — this covers at least inner whitespace, inner newlines, and the
+  characters ``, ; ' " \ [ ] = % ( ) $ ` *``. The colon is permitted only as the
+  field separator inside `--crop`, which must contain exactly three colons and
+  four unsigned integer fields.
+  Two deliberate exceptions concern *surrounding* whitespace only, and neither
+  reaches the filter graph. `--dither` is compared after its surrounding
+  whitespace is trimmed (FR-028), so `"sierra2_4a\n"` is accepted — what the
+  engine then emits is the matched enum *member*, never the supplied text, so a
+  padded value and a clean one produce byte-identical arguments. A CSV cell is
+  likewise trimmed before its grammar runs, consistently across every column and
+  as 0.2.0 did for `width`; the strict grammar still runs on the trimmed text,
+  so inner whitespace, embedded newlines, and every metacharacter above remain
+  rejected, and padding a hostile value does not launder it. The
   identical validated filter chain is applied to the palette-generation pass and
   the encoding pass, so palette generation cannot be driven by a different or
   unvalidated parameter set. No user-supplied filter script file or inline filter

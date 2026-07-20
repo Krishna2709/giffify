@@ -526,42 +526,19 @@ class DimensionResult:
     warning: str | None = None
 
 
-def _even(value: float) -> int:
-    """Round to the nearest even integer, never below the minimum dimension.
-
-    An automatically derived dimension stays even (FR-026), mirroring FFmpeg's
-    ``scale=W:-2`` behavior. An explicitly supplied bound is never passed
-    through here: it is honored exactly, odd values included.
-    """
-    rounded = math.floor(value / 2.0 + 0.5) * 2
-    return max(MIN_DIMENSION, int(rounded))
-
-
-def _floor_even(value: int) -> int:
-    return max(MIN_DIMENSION, value - (value % 2))
-
-
 def _derive(other_source: int, driving_out: int, driving_source: int) -> int:
-    """Derive the companion dimension from an EXPLICIT bound, preserving AR.
+    """Derive the companion dimension from the driving one, preserving AR.
 
-    FR-026: a dimension derived automatically from the other dimension remains
-    even, mirroring FFmpeg's ``scale=W:-2``.
+    FR-026 "Dimension parity": a derived dimension is rounded to the NEAREST
+    INTEGER and may therefore be odd. No even-rounding is applied, for the same
+    reason an explicit bound is honored exactly -- GIF is a palette-based format
+    without chroma subsampling, so it imposes no even-dimension constraint.
+
+    This is the version 0.1.0 rule and it applies on EVERY path: profile-only,
+    width-only, height-only, and both-bounds. There is deliberately only one
+    derivation helper so the paths cannot drift apart again.
     """
-    if driving_out == driving_source:
-        # Identity scale: no resampling, so keep the source dimension exactly.
-        return max(MIN_DIMENSION, other_source)
-    return _even(other_source * driving_out / driving_source)
-
-
-def _derive_legacy(other_source: int, driving_out: int, driving_source: int) -> int:
-    """Derive the companion dimension for a PROFILE-ONLY invocation.
-
-    FR-026 is explicit that when neither width nor height is supplied, dimension
-    derivation is unchanged from version 0.1.0 so profile-only invocations
-    produce the same dimensions as earlier versions. That takes precedence over
-    the even-parity rule, which governs derivations driven by an explicit bound.
-    """
-    return max(1, round(other_source * driving_out / driving_source))
+    return max(MIN_DIMENSION, round(other_source * driving_out / driving_source))
 
 
 def resolve_output_dimensions(
@@ -587,8 +564,8 @@ def resolve_output_dimensions(
     if width is None and height is None:
         # Profile-only path: unchanged from v0.1.0/v0.2.0, and never warns.
         bound = profile_max_width if profile_max_width is not None else eff_w
-        out_w = max(1, int(bound) if allow_upscale else min(eff_w, int(bound)))
-        out_h = _derive_legacy(eff_h, out_w, eff_w)
+        out_w = max(MIN_DIMENSION, int(bound) if allow_upscale else min(eff_w, int(bound)))
+        out_h = _derive(eff_h, out_w, eff_w)
         return DimensionResult(out_w, out_h, allow_upscale and (out_w > eff_w or out_h > eff_h))
 
     # An explicit bound overrides the profile maximum width entirely (FR-026).
@@ -597,12 +574,13 @@ def resolve_output_dimensions(
             out_w = width
             out_h = _derive(eff_h, width, eff_w)
             if out_h > height:
-                out_h = _floor_even(height)
+                # Rounding overshot the other bound; honor that bound exactly.
+                out_h = height
         else:
             out_h = height
             out_w = _derive(eff_w, height, eff_h)
             if out_w > width:
-                out_w = _floor_even(width)
+                out_w = width
     elif width is not None:
         out_w = width
         out_h = _derive(eff_h, width, eff_w)

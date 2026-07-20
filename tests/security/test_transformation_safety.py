@@ -197,6 +197,38 @@ def non_empty(values):
     return tuple(v for v in values if not isinstance(v, str) or v.strip())
 
 
+# Corpus values that are nothing but a legal value wrapped in whitespace. A CSV
+# cell is trimmed before the grammar runs -- every column has always behaved
+# that way, and v0.2.0 accepted a padded ``width``, so failing a whole batch
+# over a spreadsheet's leading space is a bug, not a defense. These forms stay
+# hostile on the command line and (except ``width``) in JSON, where the attack
+# lists below still carry them; only the CSV lists drop them, and
+# ``TestCsvCellTrimmingOpensNoHole`` proves the trim admits nothing else.
+PADDED_BUT_LEGAL = (
+    " 640",
+    "640 ",
+    "\t640",
+    "640\n",
+    "640\r\n",
+    " 2.0",
+    "2.0 ",
+    "2.0\n",
+    " 0:0:10:10",
+    "0:0:10:10 ",
+    "0:0:10:10\n",
+)
+
+
+def csv_hostile(values):
+    """Drop whitespace-padded legal values from a CSV attack list.
+
+    Everything else -- inner whitespace, embedded newlines, metacharacters,
+    non-ASCII digits, out-of-range numbers -- survives the trim and must still
+    be rejected, which is what the CSV tests then assert.
+    """
+    return tuple(v for v in non_empty(values) if v not in PADDED_BUT_LEGAL)
+
+
 class TransformSafetyCase(TransformEngineTestCase):
     """Assertion helpers shared by every input channel in this module."""
 
@@ -691,25 +723,25 @@ class TestCsvManifestRejection(TransformSafetyCase):
         return self.batch_manifest(manifest, "--input", self.src)
 
     def test_crop_column_attacks_rejected(self):
-        for value in non_empty((*FILTER_METACHARACTERS[:6], *CROP_STRUCTURE_ATTACKS[:6])):
+        for value in csv_hostile((*FILTER_METACHARACTERS[:6], *CROP_STRUCTURE_ATTACKS[:6])):
             with self.subTest(crop=value):
                 res = self.batch("crop", value)
                 self.assert_rejected(res, "INVALID_CROP", where=f"csv crop={value!r}")
 
     def test_width_column_attacks_rejected(self):
-        for value in non_empty(INTEGER_ATTACKS[:12]):
+        for value in csv_hostile(INTEGER_ATTACKS)[:12]:
             with self.subTest(width=value):
                 res = self.batch("width", value)
                 self.assert_rejected(res, "INVALID_DIMENSIONS", where=f"csv width={value!r}")
 
     def test_speed_column_attacks_rejected(self):
-        for value in non_empty(SPEED_ATTACKS[:10]):
+        for value in csv_hostile(SPEED_ATTACKS)[:10]:
             with self.subTest(speed=value):
                 res = self.batch("speed", value)
                 self.assert_rejected(res, "INVALID_SPEED", where=f"csv speed={value!r}")
 
     def test_dither_column_attacks_rejected(self):
-        for value in non_empty(DITHER_ATTACKS[:10]):
+        for value in csv_hostile(DITHER_ATTACKS)[:10]:
             with self.subTest(dither=value):
                 res = self.batch("dither", value)
                 self.assert_rejected(res, "INVALID_DITHER", where=f"csv dither={value!r}")
@@ -737,6 +769,73 @@ class TestCsvManifestRejection(TransformSafetyCase):
                     "speed": "2.0\ndrawtext=text=x",
                     "dither": "none\ndrawtext=text=x",
                 }[column]
+                res = self.batch(column, value)
+                self.assert_rejected(res, code, where=f"csv {column}={value!r}")
+
+
+class TestCsvCellTrimmingOpensNoHole(TransformSafetyCase):
+    """A CSV cell is trimmed before the grammar runs; prove that is all it does.
+
+    Trimming forgives padding only. The FR-025..FR-028 grammars still run on the
+    trimmed text and are \\Z-anchored over ``[0-9.:_a-z]``, so nothing that was
+    hostile before the trim becomes acceptable after it: the trim can only
+    remove leading/trailing whitespace, and every rejection below depends on a
+    character the trim cannot reach.
+    """
+
+    def batch(self, column, value):
+        return self.batch_manifest(self.write_csv_manifest(column, value), "--input", self.src)
+
+    def test_padded_legal_cells_are_accepted(self):
+        # The M-1 regression: these worked in v0.2.0 (width) or are consistent
+        # with every other column, and must not fail a whole batch.
+        for column, value in (
+            ("width", " 640"),
+            ("width", "640 "),
+            ("width", "\t640\t"),
+            ("height", " 360 "),
+            ("speed", " 2.0 "),
+            ("crop", " 0:0:100:100 "),
+            ("dither", " sierra2_4a "),
+        ):
+            with self.subTest(column=column, value=value):
+                res = self.batch(column, value)
+                self.assertEqual(res.returncode, 0, f"csv {column}={value!r}: {res.result}")
+                self.assert_no_traceback(res)
+
+    def test_padding_a_hostile_value_does_not_launder_it(self):
+        # Wrap each attack in the whitespace the trim removes. The value under
+        # the padding is still hostile, so the verdict must not change.
+        for column, code, payload in (
+            ("crop", "INVALID_CROP", "0:0:10:10,movie=/etc/passwd"),
+            ("crop", "INVALID_CROP", "0:0:100 :100"),
+            ("crop", "INVALID_CROP", "0:0:10:10[a];[a]drawtext=text=x"),
+            ("width", "INVALID_DIMENSIONS", "640,scale=2:2"),
+            ("width", "INVALID_DIMENSIONS", "6 40"),
+            ("width", "INVALID_DIMENSIONS", "0x10"),
+            ("width", "INVALID_DIMENSIONS", "$(id)"),
+            ("speed", "INVALID_SPEED", "2.0;drawtext=text=x"),
+            ("speed", "INVALID_SPEED", "2. 0"),
+            ("dither", "INVALID_DITHER", "none[a];[a]movie=/etc/passwd"),
+            ("dither", "INVALID_DITHER", "sier ra2_4a"),
+        ):
+            for padded in (f" {payload}", f"{payload} ", f"  {payload}  ", f"\t{payload}\n"):
+                with self.subTest(column=column, value=padded):
+                    res = self.batch(column, padded)
+                    self.assert_rejected(res, code, where=f"csv {column}={padded!r}")
+
+    def test_trimming_never_reaches_inside_a_quoted_cell(self):
+        # Only the ends are trimmed. Whitespace and newlines in the middle of a
+        # quoted cell survive into the grammar and are rejected there.
+        for column, code, value in (
+            ("width", "INVALID_DIMENSIONS", " 6 40 "),
+            ("width", "INVALID_DIMENSIONS", " 64\n0 "),
+            ("crop", "INVALID_CROP", " 0:0:100\n:100 "),
+            ("crop", "INVALID_CROP", " 0:0: 100:100 "),
+            ("speed", "INVALID_SPEED", " 2\n.0 "),
+            ("dither", "INVALID_DITHER", " sierra2\n_4a "),
+        ):
+            with self.subTest(column=column, value=value):
                 res = self.batch(column, value)
                 self.assert_rejected(res, code, where=f"csv {column}={value!r}")
 

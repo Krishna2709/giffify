@@ -180,27 +180,33 @@ class TestExplicitDimensions(TransformIntegrationCase):
 
     def test_explicit_odd_width_is_honored_exactly(self):
         # FR-026 parity rule: an explicitly supplied bound is honored exactly,
-        # odd values included (GIF has no even-dimension constraint). The
-        # derived height rounds to even: 1080 * 601 / 1920 = 338.06 -> 338.
+        # odd values included (GIF has no even-dimension constraint), and the
+        # derived side rounds to the nearest integer, odd or even, exactly as
+        # v0.1.0/v0.2.0 did: 1080 * 601 / 1920 = 338.06 -> 338.
         res = self.create(self.wide, "odd-width.gif", "--width", "601")
         clip = res.created[0]
         self.assertEqual(clip["width"], 601)
         self.assertEqual(clip["width"] % 2, 1, "explicit odd width must not be rounded")
+        self.assertEqual(clip["height"], round(1080 * 601 / 1920))
         self.assertEqual(clip["height"], 338)
-        self.assertEqual(clip["height"] % 2, 0, "a derived dimension must be even")
         self.assert_gif_geometry(self.output_path("odd-width.gif"), 601, 338)
 
     def test_explicit_odd_height_is_honored_exactly(self):
+        # The derived width here is ODD (1920 * 301 / 1080 = 535.19 -> 535).
+        # Under the retired even-rounding rule it became 536; FR-026 now
+        # mandates round() on every path, so 535 is the correct answer and the
+        # one v0.1.0/v0.2.0 arithmetic produces.
         res = self.create(self.wide, "odd-height.gif", "--height", "301")
         clip = res.created[0]
         self.assertEqual(clip["height"], 301)
-        self.assertEqual(clip["width"] % 2, 0)
-        self.assert_gif_geometry(self.output_path("odd-height.gif"), clip["width"], 301)
+        self.assertEqual(clip["width"], round(1920 * 301 / 1080))
+        self.assertEqual(clip["width"], 535)
+        self.assert_gif_geometry(self.output_path("odd-height.gif"), 535, 301)
 
     def test_both_bounds_fit_inside_the_box_preserving_aspect(self):
         # FR-026: with both bounds the frame is scaled to the largest size that
         # satisfies both while preserving the aspect ratio. 1920x1080 into an
-        # 800x200 box is height-limited: 200 * 16/9 = 355.6 -> 356 (even).
+        # 800x200 box is height-limited: 200 * 16/9 = 355.6 -> 356.
         res = self.create(self.wide, "box.gif", "--width", "800", "--height", "200")
         clip = res.created[0]
         self.assertLessEqual(clip["width"], 800)
@@ -219,7 +225,7 @@ class TestExplicitDimensions(TransformIntegrationCase):
 
     def test_explicit_height_overrides_profile_maximum(self):
         # The other direction: an explicit height also displaces the profile's
-        # maximum width entirely. 1920 * 700 / 1080 = 1244.4 -> 1244 (even).
+        # maximum width entirely. 1920 * 700 / 1080 = 1244.4 -> 1244 (nearest).
         res = self.create(self.wide, "over-h.gif", "--height", "700", profile="small")
         clip = res.created[0]
         self.assertEqual((clip["width"], clip["height"]), (1244, 700))
@@ -254,7 +260,7 @@ class TestExplicitDimensions(TransformIntegrationCase):
 
 
 # ---------------------------------------------------------------------------
-# Backward-compatibility regression: the profile-only path (FR-026, AC-0.3.13)
+# Backward-compatibility regression: every derivation path (FR-026, AC-0.3.13)
 # ---------------------------------------------------------------------------
 class TestProfileOnlyRegression(TransformIntegrationCase):
     """Lock in the v0.1.0/v0.2.0 derived-dimension arithmetic.
@@ -267,10 +273,13 @@ class TestProfileOnlyRegression(TransformIntegrationCase):
         balanced 640 -> round(321.28) = 321  (odd)
         high     960 -> round(481.92) = 482  (even)
 
-    If the version 0.3.0 even-parity rule of FR-026 ever leaked into the
-    profile-only path, 241 would become 240 or 242 and 321 would become 320 or
-    322, and these tests would fail. FR-026 is explicit that the profile-only
-    path is unchanged and takes precedence over the even-rounding rule.
+    The same arithmetic governs an explicit ``--width``, which existed in
+    v0.1.0. An earlier 0.3.0 draft rounded the derived side of an explicit
+    bound to an even value, silently shifting 320x161 to 320x160 and 500x251 to
+    500x252 for this very source. FR-026 "Dimension parity" now mandates
+    round()-to-nearest on EVERY path -- profile-only, width-only, height-only
+    and both-bounds -- so these expectations are the ones the released 0.2.0
+    engine produces, verified by executing it side by side with 0.3.0.
     """
 
     odd: ClassVar[str]
@@ -323,10 +332,65 @@ class TestProfileOnlyRegression(TransformIntegrationCase):
         self.assertEqual(clip["transformations"]["dither"], "sierra2_4a")
         self.assertIsNone(clip["transformations"]["bayerScale"])
 
-    def test_profile_only_high_keeps_legacy_even_height(self):
+    def test_profile_only_high_keeps_legacy_derived_height(self):
         clip = self._assert_profile_only("high")
         self.assertEqual(clip["height"], 482)
         self.assertEqual(clip["transformations"]["dither"], "sierra2_4a")
+
+    # The exact dimensions the released v0.2.0 engine produced for an explicit
+    # --width on this source, captured by executing it. Two of the three were
+    # measured regressions in the 0.3.0 review.
+    V020_EXPLICIT_WIDTH: ClassVar[dict] = {320: 161, 500: 251, 640: 321}
+
+    def test_explicit_width_keeps_v0_2_0_dimensions(self):
+        for width, height in sorted(self.V020_EXPLICIT_WIDTH.items()):
+            with self.subTest(width=width):
+                name = f"explicit-{width}.gif"
+                res = self.create(self.odd, name, "--width", str(width))
+                clip = res.created[0]
+                self.assertEqual(
+                    (clip["width"], clip["height"]),
+                    (width, height),
+                    f"--width {width} diverged from the v0.2.0 contract",
+                )
+                self.assertEqual(clip["height"], round(502 * width / 1000))
+                # Measured off the produced GIF, not merely reported.
+                self.assert_gif_geometry(self.output_path(name), width, height)
+
+    def test_manifest_width_keeps_v0_2_0_dimensions(self):
+        # The same regression reached the manifest top-level and clip-level
+        # width fields, so lock those paths too.
+        manifest = os.path.join(self.project, "widths.json")
+        with open(manifest, "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "schemaVersion": 1,
+                    "input": self.odd,
+                    "width": 320,
+                    "clips": [
+                        {"name": "top", "start": "0", "end": "1"},
+                        {"name": "clip", "start": "0", "end": "1", "width": 500},
+                    ],
+                },
+                fh,
+            )
+        res = self.run_engine(["batch", "--manifest", manifest])
+        self.assert_exit(res, 0)
+        by_name = {c["name"]: c for c in res.created}
+        self.assertEqual((by_name["top"]["width"], by_name["top"]["height"]), (320, 161))
+        self.assertEqual((by_name["clip"]["width"], by_name["clip"]["height"]), (500, 251))
+        self.assert_gif_geometry(self.output_path("top.gif"), 320, 161)
+        self.assert_gif_geometry(self.output_path("clip.gif"), 500, 251)
+
+    def test_explicit_width_derivation_equals_profile_only_derivation(self):
+        # The two paths share one helper, so the same driving width must give
+        # the same derived height whichever supplied it (balanced max = 640).
+        explicit = self.create(self.odd, "same-explicit.gif", "--width", "640").created[0]
+        profile = self.create(self.odd, "same-profile.gif", profile="balanced").created[0]
+        self.assertEqual(
+            (explicit["width"], explicit["height"]), (profile["width"], profile["height"])
+        )
+        self.assertEqual((explicit["width"], explicit["height"]), (640, 321))
 
     def test_profile_only_output_is_byte_identical_across_runs(self):
         # NFR-002: same source, range, profile and settings -> identical output.
@@ -819,11 +883,29 @@ class TestManifestTransformations(TransformIntegrationCase):
         res = self.run_engine(["batch", "--manifest", csv_path, "--input", self.src])
         self.assert_exit(res, 0)
         by_name = {c["name"]: c for c in res.created}
-        self.assertEqual((by_name["wide"]["width"], by_name["wide"]["height"]), (300, 76))
-        self.assert_gif_geometry(self.output_path("wide.gif"), 300, 76)
+        # Derived heights round to nearest (FR-026): 150 * 300 / 600 = 75 for
+        # the cropped clip, 720 * 240 / 1280 = 135 for the uncropped one.
+        self.assertEqual((by_name["wide"]["width"], by_name["wide"]["height"]), (300, 75))
+        self.assert_gif_geometry(self.output_path("wide.gif"), 300, 75)
         self.assertEqual(by_name["quick"]["outputDurationMs"], 1000)
         self.assertEqual(by_name["quick"]["transformations"]["dither"], "none")
-        self.assert_gif_geometry(self.output_path("quick.gif"), 240, 136)
+        self.assert_gif_geometry(self.output_path("quick.gif"), 240, 135)
+
+    def test_csv_manifest_tolerates_padded_transformation_cells(self):
+        # M-1 regression: a leading space in a CSV cell is a spreadsheet
+        # artifact. v0.2.0 accepted " 480" for width and every other column
+        # still does, so the 0.3.0 transformation columns must not fail the
+        # whole batch with INVALID_DIMENSIONS over padding.
+        csv_path = os.path.join(self.project, "padded.csv")
+        with open(csv_path, "w", encoding="utf-8") as fh:
+            fh.write("name,start,end,crop,width,speed,dither\n")
+            fh.write("padded,0,2, 0:0:600:150 , 300 , 1.0 , sierra2_4a \n")
+        res = self.run_engine(["batch", "--manifest", csv_path, "--input", self.src])
+        self.assert_exit(res, 0)
+        clip = res.created[0]
+        self.assertEqual((clip["width"], clip["height"]), (300, 75))
+        self.assertEqual(clip["transformations"]["dither"], "sierra2_4a")
+        self.assert_gif_geometry(self.output_path("padded.gif"), 300, 75)
 
 
 # ---------------------------------------------------------------------------
@@ -859,7 +941,7 @@ class TestTransformationReporting(TransformIntegrationCase):
         self.assertEqual(clip["durationMs"], 4000)
         self.assertEqual(clip["outputDurationMs"], 2000)
         self.assertEqual(clip["width"], 401)
-        self.assertEqual(clip["height"], 200)  # even, derived from an explicit bound
+        self.assertEqual(clip["height"], 200)  # 400 * 401 / 800 = 200.5 -> 200 (nearest)
         self.assertEqual(
             clip["transformations"],
             {
@@ -898,7 +980,8 @@ class TestTransformationReporting(TransformIntegrationCase):
         raised = self.create(self.src, "raise.gif", "--width", "2000", "--allow-upscale")
         self.assertTrue(raised.created[0]["transformations"]["upscaled"])
         self.assertEqual(raised.created[0]["width"], 2000)
-        self.assert_gif_geometry(self.output_path("raise.gif"), 2000, 1126)
+        # 720 * 2000 / 1280 = 1125.0 exactly; round() keeps the odd value.
+        self.assert_gif_geometry(self.output_path("raise.gif"), 2000, 1125)
 
 
 if __name__ == "__main__":

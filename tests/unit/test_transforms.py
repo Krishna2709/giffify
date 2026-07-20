@@ -10,6 +10,7 @@ import os
 import sys
 import unittest
 from decimal import Decimal
+from typing import ClassVar
 
 sys.path.insert(0, os.path.dirname(__file__))
 import vtgtest
@@ -281,7 +282,8 @@ class TestDimensionResolution(TransformTestCase):
 
     def test_both_bounds_width_binds(self):
         r = self.resolve(1920, 1080, width=400, height=1000)
-        self.assertEqual((r.width, r.height), (400, 226))
+        self.assertEqual((r.width, r.height), (400, round(1080 * 400 / 1920)))
+        self.assertEqual((r.width, r.height), (400, 225))
         self.assertLessEqual(r.height, 1000)
 
     def test_explicit_width_overrides_profile_maximum_upward(self):
@@ -321,17 +323,55 @@ class TestDimensionResolution(TransformTestCase):
         r = self.resolve(1920, 1080, height=361)
         self.assertEqual(r.height, 361)
 
-    def test_derived_dimension_stays_even(self):
-        # 1280x720 at width 500 derives 281.25; the derived side rounds to even.
+    def test_derived_dimension_rounds_to_nearest_and_may_be_odd(self):
+        # FR-026 "Dimension parity": 1280x720 at width 500 derives 281.25, which
+        # rounds to the nearest integer (281) and is deliberately left odd. GIF
+        # is palette-based with no chroma subsampling, so no even constraint
+        # applies -- the same reason an explicit odd bound is honored exactly.
         r = self.resolve(1280, 720, width=500)
         self.assertEqual(r.width, 500)
-        self.assertEqual(r.height, 282)
-        self.assertEqual(r.height % 2, 0)
+        self.assertEqual(r.height, round(720 * 500 / 1280))
+        self.assertEqual(r.height, 281)
 
-    def test_derived_dimension_even_from_height_bound(self):
+    def test_derived_dimension_from_height_bound_rounds_to_nearest(self):
+        # 1280x721 at height 500 derives 887.65 -> 888 (odd input, even result);
+        # 1000x502 at height 200 derives 398.4 -> 398; 502x334 at height 250
+        # derives 375.7 -> 376. The rule is round(), never a parity adjustment.
         r = self.resolve(1280, 721, height=500)
-        self.assertEqual(r.height, 500)
-        self.assertEqual(r.width % 2, 0)
+        self.assertEqual((r.width, r.height), (round(1280 * 500 / 721), 500))
+        self.assertEqual(r.width, 888)
+        r = self.resolve(4000, 3000, height=501)
+        self.assertEqual((r.width, r.height), (668, 501))
+        self.assertEqual(r.width, round(4000 * 501 / 3000))
+
+    def test_derivation_identical_on_every_path(self):
+        # The regression this locks: profile-only, width-only, and both-bounds
+        # must all use one derivation rule. A single helper backs all three, so
+        # the same driving width must produce the same derived height whichever
+        # path supplied it.
+        profile_only = self.resolve(1000, 502, profile_max_width=640)
+        width_only = self.resolve(1000, 502, width=640)
+        both_bounds = self.resolve(1000, 502, width=640, height=8192)
+        self.assertEqual((profile_only.width, profile_only.height), (640, 321))
+        self.assertEqual(
+            (width_only.width, width_only.height), (profile_only.width, profile_only.height)
+        )
+        self.assertEqual(
+            (both_bounds.width, both_bounds.height), (profile_only.width, profile_only.height)
+        )
+
+    def test_both_bounds_always_fit_inside_the_box(self):
+        # Sweep the both-bounds path: neither resolved dimension may exceed its
+        # explicit bound, whichever side binds and however the derived side
+        # rounds. Under round()-to-nearest the derived side can land exactly on
+        # the other bound but never past it.
+        for eff_w, eff_h in ((1000, 999), (999, 1000), (1920, 1080), (502, 334), (1000, 502)):
+            for w in (99, 100, 251, 500, 501):
+                for h in (99, 100, 249, 499, 500):
+                    r = self.resolve(eff_w, eff_h, width=w, height=h, allow_upscale=True)
+                    self.assertLessEqual(r.width, w, f"{eff_w}x{eff_h} -> {w}x{h}")
+                    self.assertLessEqual(r.height, h, f"{eff_w}x{eff_h} -> {w}x{h}")
+                    self.assertGreaterEqual(min(r.width, r.height), 2)
 
     def test_no_output_dimension_below_two(self):
         r = self.resolve(4000, 10, width=100)
@@ -341,6 +381,111 @@ class TestDimensionResolution(TransformTestCase):
         first = self.resolve(1920, 1080, width=777, profile_max_width=640)
         second = self.resolve(1920, 1080, width=777, profile_max_width=640)
         self.assertEqual(first, second)
+
+
+class TestVersion020DimensionParity(TransformTestCase):
+    """Lock the exact dimensions the version 0.2.0 engine produced (NFR-006).
+
+    Every expectation below was captured by EXECUTING the released 0.2.0 engine
+    against synthetic sources of the stated geometry, then re-verified against
+    0.3.0 with byte-identical GIF output. An adversarial review of 0.3.0 caught
+    an even-rounding rule silently shifting the derived side of an explicit
+    --width by one pixel; FR-026 "Dimension parity" now mandates round() on
+    every path, and this table is the guard against that drifting again.
+
+    Do not "fix" a failure here by editing the expected values: a mismatch means
+    0.3.0 has diverged from 0.1.0/0.2.0 output and the engine is what is wrong.
+    """
+
+    # (effective source, explicit width, profile max width) -> (out_w, out_h)
+    V020_WIDTH_ONLY: ClassVar[dict] = {
+        # The four dimension regressions the 0.3.0 review measured.
+        (1000, 502, 320): (320, 161),
+        (1000, 502, 500): (500, 251),
+        (1280, 534, 500): (500, 209),
+        (502, 334, 500): (500, 333),
+        # The rest of the executed comparison matrix.
+        (1000, 502, 640): (640, 321),
+        (1280, 534, 320): (320, 134),
+        (1280, 534, 640): (640, 267),
+        (502, 334, 320): (320, 213),
+        (1920, 1080, 320): (320, 180),
+        (1920, 1080, 500): (500, 281),
+        (1920, 1080, 640): (640, 360),
+    }
+
+    V020_PROFILE_ONLY: ClassVar[dict] = {
+        (1000, 502, 480): (480, 241),
+        (1000, 502, 640): (640, 321),
+        (1000, 502, 960): (960, 482),
+        (1280, 534, 480): (480, 200),
+        (1280, 534, 640): (640, 267),
+        (1280, 534, 960): (960, 400),
+        (502, 334, 480): (480, 319),
+        (1920, 1080, 480): (480, 270),
+        (1920, 1080, 640): (640, 360),
+        (1920, 1080, 960): (960, 540),
+    }
+
+    def test_explicit_width_matches_v0_2_0_exactly(self):
+        for (eff_w, eff_h, width), expected in sorted(self.V020_WIDTH_ONLY.items()):
+            with self.subTest(source=f"{eff_w}x{eff_h}", width=width):
+                r = transforms.resolve_output_dimensions(
+                    eff_w,
+                    eff_h,
+                    width=width,
+                    height=None,
+                    profile_max_width=None,
+                    allow_upscale=False,
+                )
+                self.assertEqual((r.width, r.height), expected)
+
+    def test_explicit_width_unaffected_by_a_profile_maximum(self):
+        # An explicit bound overrides the profile maximum (FR-026) and must
+        # still land on the v0.2.0 dimensions.
+        for (eff_w, eff_h, width), expected in sorted(self.V020_WIDTH_ONLY.items()):
+            with self.subTest(source=f"{eff_w}x{eff_h}", width=width):
+                r = transforms.resolve_output_dimensions(
+                    eff_w,
+                    eff_h,
+                    width=width,
+                    height=None,
+                    profile_max_width=960,
+                    allow_upscale=False,
+                )
+                self.assertEqual((r.width, r.height), expected)
+
+    def test_profile_only_matches_v0_2_0_exactly(self):
+        for (eff_w, eff_h, max_width), expected in sorted(self.V020_PROFILE_ONLY.items()):
+            with self.subTest(source=f"{eff_w}x{eff_h}", profile_max_width=max_width):
+                r = transforms.resolve_output_dimensions(
+                    eff_w,
+                    eff_h,
+                    width=None,
+                    height=None,
+                    profile_max_width=max_width,
+                    allow_upscale=False,
+                )
+                self.assertEqual((r.width, r.height), expected)
+
+    def test_derived_side_is_never_forced_even(self):
+        # Each regression case derives an ODD companion dimension. If any of
+        # these comes back even, even-rounding has returned somewhere.
+        for (eff_w, eff_h, width), (_, out_h) in self.V020_WIDTH_ONLY.items():
+            if out_h % 2 == 0:
+                continue
+            r = transforms.resolve_output_dimensions(
+                eff_w, eff_h, width=width, height=None, profile_max_width=None, allow_upscale=False
+            )
+            self.assertEqual(r.height % 2, 1, f"{eff_w}x{eff_h} --width {width}")
+
+    def test_derivation_is_plain_round_to_nearest(self):
+        # The rule stated as an equation, over the whole matrix.
+        for eff_w, eff_h, width in self.V020_WIDTH_ONLY:
+            r = transforms.resolve_output_dimensions(
+                eff_w, eff_h, width=width, height=None, profile_max_width=None, allow_upscale=False
+            )
+            self.assertEqual(r.height, round(eff_h * width / eff_w))
 
 
 class TestUpscaleGating(TransformTestCase):
