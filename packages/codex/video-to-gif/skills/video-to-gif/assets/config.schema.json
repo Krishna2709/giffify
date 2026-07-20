@@ -55,6 +55,46 @@
       "type": "boolean",
       "default": false
     },
+    "transformations": {
+      "description": "Global transformation defaults (spec section 9.6, FR-026..FR-028). Every field is optional and additive; they do not change schemaVersion. A configuration that omits this object behaves as though the documented defaults were supplied. NOTE: 'crop' is deliberately absent and is NOT permitted here — a crop rectangle is only meaningful against one specific source's dimensions, so validate-config rejects a 'crop' key with a validation error at field path transformations.crop (exit 2). Supply a crop per request (--crop) or per clip in a manifest. validate-config applies every source-independent check below; source-dependent checks (crop bounds, upscale evaluation) happen during preflight.",
+      "type": "object",
+      "properties": {
+        "width": {
+          "description": "Maximum output width in pixels, 2 to 8192 (FR-026). null means the effective quality profile's maximum width applies. An out-of-range value fails with INVALID_DIMENSIONS (exit 6).",
+          "type": ["integer", "null"],
+          "minimum": 2,
+          "maximum": 8192,
+          "default": null
+        },
+        "height": {
+          "description": "Maximum output height in pixels, 2 to 8192 (FR-026). null means the height follows the effective source aspect ratio. An out-of-range value fails with INVALID_DIMENSIONS (exit 6).",
+          "type": ["integer", "null"],
+          "minimum": 2,
+          "maximum": 8192,
+          "default": null
+        },
+        "speed": {
+          "description": "Playback speed multiplier, 0.25 to 4.0 with at most three fractional digits (FR-027). 1.0 leaves timing unchanged. An invalid value fails with INVALID_SPEED (exit 6).",
+          "type": ["number", "null"],
+          "minimum": 0.25,
+          "maximum": 4.0,
+          "default": 1.0
+        },
+        "dither": {
+          "description": "Palette-use dither mode (FR-028). null means the effective quality profile's default mode (section 15.5): bayer with bayerScale 5 for 'small', sierra2_4a otherwise. An unknown value fails with INVALID_DITHER (exit 6).",
+          "type": ["string", "null"],
+          "enum": ["none", "bayer", "floyd_steinberg", "sierra2", "sierra2_4a", null],
+          "default": null
+        },
+        "bayerScale": {
+          "description": "Bayer matrix scale, 0 to 5 (FR-028). Meaningful only when the effective dither mode is 'bayer'; supplying it explicitly under any other mode fails with INVALID_DITHER (exit 6). null means the profile default applies (5 for 'small'), falling back to 2.",
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 5,
+          "default": null
+        }
+      }
+    },
     "limits": {
       "description": "Resource-safety and download limits (spec SEC-011, FR-021, section 9.5).",
       "type": "object",

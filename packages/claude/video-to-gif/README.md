@@ -3,7 +3,7 @@
 Generate optimized animated GIFs from explicit video timestamp ranges. This
 package wraps the portable `video-to-gif` Agent Skill for Claude Code.
 
-- Version: 0.2.0
+- Version: 0.3.0
 - Author: Krishna2709 (https://github.com/Krishna2709)
 - License: MIT
 - Source repository: https://github.com/Krishna2709/giffify

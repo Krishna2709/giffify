@@ -7,9 +7,11 @@ This module only depends on :mod:`vtg.errors`.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any
 
-from . import errors
+from . import errors, transforms
+from .transforms import CropRect
 
 # ---------------------------------------------------------------------------
 # Quality profiles (FR-014)
@@ -207,10 +209,29 @@ class ClipSpec:
     fps: int | None = None
     colors: int | None = None
     loop: LoopValue | None = None
+    # v0.3.0 transformation fields (spec section 10.4). All optional/additive;
+    # a clip-level value outranks every other precedence level (FR-024).
+    crop: CropRect | None = None
+    height: int | None = None
+    speed: Decimal | None = None
+    dither: str | None = None
+    bayer_scale: int | None = None
 
     @property
     def duration_ms(self) -> int:
         return self.end_ms - self.start_ms
+
+    @property
+    def transform_spec(self) -> transforms.TransformSpec:
+        """The clip-level transformation level for precedence merging (FR-024)."""
+        return transforms.TransformSpec(
+            crop=self.crop,
+            width=self.width,
+            height=self.height,
+            speed=self.speed,
+            dither=self.dither,
+            bayer_scale=self.bayer_scale,
+        )
 
 
 @dataclass
@@ -223,3 +244,45 @@ class EffectiveSettings:
     colors: int
     loop: LoopValue
     profile_name: str
+    # v0.3.0 transformation state (spec FR-024..FR-030). Every field is additive
+    # and defaults to the v0.2.0 behavior, so settings constructed without them
+    # produce byte-identical FFmpeg commands.
+    crop: CropRect | None = None
+    speed: Decimal = transforms.DEFAULT_SPEED
+    dither: str | None = None
+    bayer_scale: int | None = None
+    upscaled: bool = False
+    source_width: int | None = None
+    source_height: int | None = None
+    effective_source_width: int | None = None
+    effective_source_height: int | None = None
+
+    @property
+    def effective_dither(self) -> tuple[str, int | None]:
+        """The dither mode/scale actually used, falling back to the profile."""
+        if self.dither is None:
+            return transforms.profile_dither_default(self.profile_name)
+        return self.dither, self.bayer_scale
+
+    def transformations_public(self, *, still_frame: bool = False) -> dict[str, Any]:
+        """Serialize the FR-030 ``transformations`` object.
+
+        ``still_frame`` reports a preview entry, where speed is always 1.0 and
+        the palette settings do not apply (FR-029, section 13.4).
+        """
+        src_w = self.source_width if self.source_width is not None else self.width
+        src_h = self.source_height if self.source_height is not None else self.height
+        eff_w = self.effective_source_width
+        eff_h = self.effective_source_height
+        mode, scale = self.effective_dither
+        return {
+            "crop": self.crop.to_public() if self.crop is not None else None,
+            "sourceWidth": src_w,
+            "sourceHeight": src_h,
+            "effectiveSourceWidth": eff_w if eff_w is not None else src_w,
+            "effectiveSourceHeight": eff_h if eff_h is not None else src_h,
+            "speed": 1.0 if still_frame else float(self.speed),
+            "dither": None if still_frame else mode,
+            "bayerScale": None if still_frame else scale,
+            "upscaled": self.upscaled,
+        }

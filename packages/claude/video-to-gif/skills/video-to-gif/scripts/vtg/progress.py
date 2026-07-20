@@ -55,6 +55,10 @@ class ProgressReporter:
             fields["percent"] = round(percent, 1)
         self.emit("stage_progress", **fields)
 
+    def preview_progress(self, clip_index: int, percent: float) -> None:
+        """Emit preview-extraction progress with stage ``preview`` (13.3, FR-029)."""
+        self.stage_progress(clip_index, "preview", percent)
+
     def clip_completed(self, clip_index: int, path: str) -> None:
         self.emit("clip_completed", clipIndex=clip_index, path=path)
 

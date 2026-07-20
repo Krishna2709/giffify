@@ -98,10 +98,54 @@ The agent must obtain explicit user approval before using `skip` or `clamp` when
 
 ### Optional fields
 
-- Top level: `outputDirectory`, `profile`, `loop`, `continueOnError`, `collisionPolicy`, `width`, `fps`, `colors`, `allowUpscale`.
-- Clip level: `name`, `profile`, `width`, `fps`, `colors`, `loop`.
+- Top level: `outputDirectory`, `profile`, `loop`, `continueOnError`, `collisionPolicy`, `width`, `height`, `fps`, `colors`, `allowUpscale`, `crop`, `speed`, `dither`, `bayerScale`.
+- Clip level: `name`, `profile`, `width`, `height`, `fps`, `colors`, `loop`, `crop`, `speed`, `dither`, `bayerScale`.
 
 Clip-level values override top-level values.
+
+### Transformation fields (spec section 10.4)
+
+The v0.3.0 transformation fields may appear at the top level, at the clip level, or both:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `crop` | Object with integer `x`, `y`, `width`, `height`, **or** the string `"x:y:width:height"` | Orientation-normalized source pixels; must lie inside the source frame |
+| `width` | Integer, 2 to 8192 | Maximum output width |
+| `height` | Integer, 2 to 8192 | Maximum output height (new in 0.3.0) |
+| `speed` | Number, 0.25 to 4.0, at most three fractional digits | Playback multiplier |
+| `dither` | `none`, `bayer`, `floyd_steinberg`, `sierra2`, or `sierra2_4a` | Case-sensitive |
+| `bayerScale` | Integer, 0 to 5 | Only when the effective dither mode is `bayer` |
+
+Clip-level values override top-level values **and** a command-line transformation flag for that clip (spec FR-024). An unknown transformation field generates a warning like any other unknown field.
+
+```json
+{
+  "schemaVersion": 1,
+  "input": "./videos/demo.mp4",
+  "profile": "balanced",
+  "width": 800,
+  "dither": "sierra2_4a",
+  "clips": [
+    {
+      "name": "opening",
+      "start": "00:01:00",
+      "end": "00:01:05",
+      "crop": { "x": 320, "y": 180, "width": 1280, "height": 720 }
+    },
+    {
+      "name": "reaction",
+      "start": "00:03:20",
+      "duration": 7,
+      "crop": "0:0:1920:800",
+      "speed": 2.0,
+      "dither": "bayer",
+      "bayerScale": 5
+    }
+  ]
+}
+```
+
+`schemaVersion` stays **1**: every transformation field is optional and additive, no existing field changes meaning, and a manifest that omits them behaves exactly as it did in 0.2.0. Full semantics are in `references/transformations.md`.
 
 The `name` field must not contain path separators and must not escape the output directory (see FR-011 / naming rules). The schema for JSON manifests is `assets/manifest.schema.json`.
 
@@ -113,7 +157,7 @@ The `name` field must not contain path separators and must not escape the output
 
 ### Optional columns
 
-`name`, `profile`, `width`, `fps`, `colors`, `loop`.
+`name`, `profile`, `width`, `height`, `fps`, `colors`, `loop`, `crop`, `speed`, `dither`, `bayerScale`.
 
 ### Example
 
@@ -124,12 +168,23 @@ reaction,00:03:20,,7,high
 ending,00:14:30,00:14:35,,small
 ```
 
+With transformations:
+
+```csv
+name,start,end,duration,profile,crop,width,height,speed,dither,bayerScale
+opening,00:01:00,00:01:05,,balanced,320:180:1280:720,800,,1.0,sierra2_4a,
+reaction,00:03:20,,7,high,,640,,2.0,bayer,5
+ending,00:14:30,00:14:35,,small,,,,,,
+```
+
 Rules:
 
 - Each row supplies `start` and exactly one of `end` / `duration` (leave the other column empty, as shown).
 - Empty rows are ignored.
 - Column names are case-insensitive and whitespace-trimmed.
 - Unknown columns generate warnings.
+- The `crop` column uses the colon-separated string form `x:y:width:height` — the object form is JSON-only.
+- An **empty cell** means the value is not specified for that row, so the next precedence level applies (command-line flag, then top-level manifest field, then project configuration, then the built-in default).
 
 Note: a CSV manifest does not carry the top-level `input`. Supply the source separately (for example via a CLI `--input`, per-request instruction, or project configuration).
 

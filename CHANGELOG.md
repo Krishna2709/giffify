@@ -10,6 +10,138 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes yet._
 
+## [0.3.0] - 2026-07-12
+
+Transformations without text: clips can now be cropped, explicitly resized,
+speed-adjusted, and dithered, and a new `preview` command extracts a single
+full-colour PNG still so framing can be confirmed before any GIF is encoded.
+Every transformation parameter is an integer, a bounded decimal, or a member of a
+fixed enumeration, so no user-supplied text ever reaches an FFmpeg filter graph.
+Captions and subtitle burn-in are deliberately excluded and deferred to 0.4.0
+(spec §3.3, §25.4).
+
+### Added
+
+- **Cropping** (spec FR-025): `--crop <x>:<y>:<w>:<h>` in orientation-normalized
+  source pixels, applied **before** scaling, so aspect-ratio preservation, the
+  profile maximum width, and the no-upscale rule all evaluate against the cropped
+  rectangle. The requested rectangle is applied exactly — never rounded, clamped,
+  re-centered, or expanded; a rectangle the decoded pixel format cannot express
+  triggers a conversion to a non-subsampled format instead of an adjustment.
+- **Explicit resizing** (spec FR-026): `--width` and the new `--height`, both
+  integers in the closed range 2–8192. They are *maximum bounds* with the aspect
+  ratio preserved; supplying both fits the frame inside that box. An explicit
+  bound overrides the effective quality profile's maximum width. Upscaling
+  remains gated by `--allow-upscale`, and an oversized request is clamped back to
+  the effective source size.
+- **Playback-speed adjustment** (spec FR-027): `--speed`, a decimal multiplier
+  from 0.25 to 4.0 with at most three fractional digits, implemented by retiming
+  presentation timestamps. The selected source range is unchanged; the output GIF
+  duration becomes `round(durationMs / speed)`. No frames are interpolated, and
+  retiming is applied before frame-rate conversion so the requested fps describes
+  the finished GIF.
+- **Dithering control** (spec FR-028): `--dither` with the fixed enumeration
+  `none`, `bayer`, `floyd_steinberg`, `sierra2`, `sierra2_4a`, plus
+  `--bayer-scale` (0–5) for `bayer`. Documented per-profile defaults (§15.5):
+  `bayer` with scale 5 for `small`, `sierra2_4a` for `balanced`, `high`, and
+  `custom` — these reproduce 0.1.0/0.2.0 output, so a job that specifies no
+  dither is functionally equivalent to earlier releases.
+- **`preview` subcommand** (spec FR-029, §12.9): extracts a single full-colour
+  PNG still instead of producing a GIF. `preview --input <source> --at
+  <timestamp>` for one frame, or `preview --manifest <manifest>` for one still
+  per clip at that clip's start timestamp with that clip's effective
+  transformations. Preview output is never palette-quantized. Crop, resize, and
+  orientation normalization apply exactly as they would for the corresponding
+  GIF; `speed`, `fps`, `loop`, `colors`, `dither`, and `bayerScale` are accepted,
+  change nothing, and produce one `TRANSFORMATION_NOT_APPLICABLE` warning.
+  `--dry-run`, collision policies, project-boundary rules, and remote sources all
+  apply unchanged. Generated names are `<video-stem>_<at>.png`, or
+  `<clip-name>_<start>.png` in the manifest form.
+- **Configuration**: a `transformations` object in `.video-to-gif.json` with
+  `width`, `height`, `speed`, `dither`, and `bayerScale` (spec §9.6). `crop` is
+  **not** permitted there — a rectangle is only meaningful against one specific
+  source — and `validate-config` rejects it with the field path
+  `transformations.crop`.
+- **Manifest fields** (spec §10.4, §11.2): `crop`, `width`, `height`, `speed`,
+  `dither`, and `bayerScale` at the top level, at the clip level, or both, in
+  both JSON and CSV manifests. JSON accepts either the object form
+  `{ "x", "y", "width", "height" }` or the string form `"x:y:width:height"`; CSV
+  uses the string form in a `crop` column, where an empty cell means "not
+  specified for this row".
+- **Transformation precedence** (spec FR-024, refining §9.3): clip-level manifest
+  field > command-line flag > top-level manifest field > project configuration >
+  built-in default. A per-clip value is more specific than a batch-wide flag and
+  wins; every non-transformation setting follows §9.3 unchanged.
+- **Result reporting** (spec FR-030): every `created` entry gains a
+  `transformations` object (`crop`, `sourceWidth`, `sourceHeight`,
+  `effectiveSourceWidth`, `effectiveSourceHeight`, `speed`, `dither`,
+  `bayerScale`, `upscaled`) and `outputDurationMs`; a `previews` array carries
+  `path`, `atMs`, `width`, `height`, `sizeBytes`, and the same `transformations`
+  object; `summary` gains a `previews` count. Preview entries never appear in
+  `created` and are never counted by `summary.created`. Preview extraction emits
+  progress under stage `preview`.
+- **Warnings** with stable leading tokens (spec §13.4): `UPSCALE_NOT_ALLOWED`
+  when an explicitly supplied bound was clamped to the effective source size, and
+  `TRANSFORMATION_NOT_APPLICABLE` when settings a still frame cannot express were
+  supplied to `preview`.
+- **Documentation**: new `references/transformations.md` (spec NFR-007) covering
+  the crop coordinate model, the width/height bounds and their interaction with
+  profiles and upscaling, the speed multiplier and its duration math, the dither
+  enumeration with size/quality guidance, preview frames, per-clip manifest
+  transformations, and the filter-chain order.
+
+### Changed
+
+- **No breaking changes.** Every 0.1.0 and 0.2.0 invocation behaves exactly as it
+  did: with no transformation specified, output is functionally equivalent to
+  0.2.0 for the same source, range, profile, and configuration. `--width` keeps
+  its 0.1.0 meaning as a maximum output width. Configuration, manifest, and
+  structured result schema versions all remain `1`, and no new exit code is
+  introduced — invalid transformations reuse exit 6 (`INVALID_CROP`,
+  `INVALID_DIMENSIONS`, `INVALID_SPEED`, `INVALID_DITHER`), a `preview
+  --output-name` with a non-`.png` extension reuses exit 2 (`INVALID_USAGE`), and
+  a preview collision reuses exit 7.
+- **Explicit dimension bounds are honored exactly, odd values included.** GIF is
+  a palette-based format without chroma subsampling, so it imposes no
+  even-dimension constraint and rounding an explicit bound would silently
+  contradict the request. Only a dimension *derived* from an explicit bound is
+  rounded to even; the profile-only path is unchanged from 0.1.0/0.2.0 and
+  remains byte-comparable.
+- **Dithering is now a public option.** The 0.1.0 allowance to change dithering
+  internally is superseded: an explicitly requested mode and `bayerScale` are
+  honored exactly and will not change across patch releases, while a *profile's*
+  default may change only in a minor release with a changelog entry (spec §15.5).
+
+### Security
+
+- **SEC-018 — Transformation parameter validation.** Transformation values become
+  arguments inside an FFmpeg filter graph and are treated as an injection
+  surface. Only integers, bounded decimals, and members of the fixed
+  enumerations are accepted; free text, filter strings, filter-graph fragments,
+  filter scripts, FFmpeg expressions, and option key-value pairs are rejected
+  from the command line, manifests, and configuration alike. Every parameter is
+  parsed and range-checked **before any filter graph is constructed**, and the
+  graph is built exclusively from values the engine re-serializes from its own
+  validated numeric and enum types — user-supplied text is never concatenated
+  into a filter graph. Any value containing a character outside its grammar is
+  rejected — this covers at least whitespace, newline, and the characters
+  ``, ; ' " \ [ ] = % ( ) $ ` *``. The colon is permitted only as the field
+  separator inside `--crop`,
+  which must contain exactly three colons and four unsigned integer fields. The
+  identical validated filter chain is applied to the palette-generation pass and
+  the encoding pass, so palette generation cannot be driven by a different or
+  unvalidated parameter set. No user-supplied filter script file or inline filter
+  definition is accepted through any flag, field, or key.
+- **Numeric bounds are part of the security contract**, not only usability: an
+  unbounded dimension, crop offset, or speed value is a resource-exhaustion
+  vector under SEC-011. Crop components are capped at 65535, dimensions at 8192,
+  and speed at 4.0.
+- **SEC-010 unchanged for the new paths.** The local-only protocol whitelist is
+  enforced on every FFmpeg and ffprobe invocation including preview extraction,
+  so no filter may reference a remote resource. SEC-001 remains in force:
+  subprocess arguments are always passed as arrays and `shell=True` is never
+  used.
+
 ## [0.2.0] - 2026-07-12
 
 Opt-in remote source acquisition: `video-to-gif` can now download a source from a
@@ -165,6 +297,7 @@ packaged for both Claude Code and Codex from one shared source.
   `video-to-gif`, maintainer Krishna2709, license MIT. Remaining open items
   (exact profile values and others) are tracked in spec §26.
 
-[Unreleased]: https://github.com/Krishna2709/giffify/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Krishna2709/giffify/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Krishna2709/giffify/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Krishna2709/giffify/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Krishna2709/giffify/releases/tag/v0.1.0

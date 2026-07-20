@@ -13,7 +13,7 @@
       "name": "video-to-gif",
       "source": "./packages/codex/video-to-gif",
       "description": "Generate optimized animated GIFs from explicit video timestamp ranges.",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "author": {
         "name": "Krishna2709"
       }

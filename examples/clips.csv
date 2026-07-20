@@ -1,4 +1,4 @@
-name,start,end,duration,profile
-opening,00:01:00,00:01:05,,balanced
-reaction,00:03:20,,7,high
-ending,00:14:30,00:14:35,,small
+name,start,end,duration,profile,crop,width,height,speed,dither,bayerScale
+opening,00:01:00,00:01:05,,balanced,320:180:1280:720,800,,1.0,sierra2_4a,
+reaction,00:03:20,,7,high,,640,,2.0,bayer,5
+ending,00:14:30,00:14:35,,small,,,,,,

@@ -776,7 +776,8 @@ Validation MUST reject the following with error code INVALID_CROP and exit code 
 * Any value outside the range 0 through 65535.
 * width < 2 or height < 2.
 * x + width > effective source width, or y + height > effective source height.
-* A crop rectangle supplied in project configuration (section 9.6).
+
+A crop rectangle supplied in project configuration is a separate case: because it is a schema violation rather than an invalid rectangle, it MUST be rejected as a configuration validation error with error code INVALID_CONFIG, exit code 2, and the field path transformations.crop (section 9.6), consistent with every other prohibited configuration field.
 
 The rectangle MUST be validated against the orientation-normalized source dimensions reported by inspection (FR-002), not the raw coded dimensions, so that a rotated source is cropped in the geometry the user sees.
 
@@ -815,8 +816,8 @@ Upscaling:
 Dimension parity:
 
 * An explicitly supplied width or height MUST be honored exactly, including odd values. GIF is a palette-based format without chroma subsampling, so it imposes no even-dimension constraint, and rounding an explicit bound would silently contradict the user's request.
-* A dimension derived automatically from the other dimension MUST remain even, preserving the version 0.1.0 scaling behavior for profile-only and single-bound invocations.
-* When neither width nor height is supplied, dimension derivation is unchanged from version 0.1.0, so that profile-only invocations produce the same dimensions as earlier versions.
+* When width or height is explicitly supplied, a dimension derived from that bound MUST be rounded to an even value.
+* When neither width nor height is supplied, dimension derivation is unchanged from version 0.1.0, which rounds to the nearest integer and MAY therefore produce an odd dimension. Profile-only invocations MUST produce byte-comparable output to version 0.2.0; this rule takes precedence over the even-rounding rule above, which applies only to the explicit-bound path.
 * No output dimension may be smaller than 2.
 
 The resolved dimensions MUST be deterministic for the same source, crop, profile, and bounds (NFR-002) and MUST be reported (FR-030).
@@ -888,7 +889,7 @@ Requirements:
 * The output format MUST be PNG in full colour. Preview output MUST NOT be palette-quantized, so preview fidelity is not limited by GIF colour reduction.
 * The --at value MUST be a timestamp in an FR-004 format and MUST satisfy 0 <= at < source duration. A value outside that range MUST be rejected with error code INVALID_TIMESTAMP and exit code 6.
 * Orientation normalization, cropping (FR-025), and resizing (FR-026) MUST be applied exactly as they would be for a GIF of the same clip with the same settings, including the profile maximum width and the upscale rules.
-* The temporal and palette settings speed, fps, loop, colors, dither, and bayerScale do not apply to a still frame. When supplied, they MUST be accepted, MUST NOT change the extracted image, and MUST produce one warning per invocation whose message begins with the token TRANSFORMATION_NOT_APPLICABLE and names the ignored settings.
+* The temporal and palette settings speed, fps, loop, colors, dither, and bayerScale do not apply to a still frame. When supplied, they MUST be accepted, MUST NOT change the extracted image, and MUST produce one warning per invocation whose message begins with the token TRANSFORMATION_NOT_APPLICABLE and names the ignored settings. The check MUST consider every source of those settings that applies to the invocation, including command-line flags and top-level and clip-level manifest fields, so a setting supplied only in a manifest is reported rather than silently ignored.
 * Output naming: a user-supplied --output-name MUST be a bare filename with no path separators, sanitized under FR-011. Every FR-011 rule applies with .png substituted for .gif, so preview names exclude characters invalid on Windows, prevent directory traversal, avoid reserved Windows device names, remain deterministic, preserve the timestamp suffix when shortening is required, and stay within the safe filename length. When the supplied name has no extension, .png MUST be appended; when it has an extension other than .png, the command MUST fail with error code INVALID_USAGE and exit code 2. A generated name MUST follow <video-stem>_<at>.png, for example product-demo_00-01-02.500.png. In the manifest form, a named clip MUST produce <clip-name>_<start>.png.
 * The output directory (FR-010), project-boundary rules (SEC-003), and collision policies (FR-012) apply unchanged, including the default collision policy fail. A preview MUST NOT overwrite an existing file by default.
 * Temporary output, verification, and atomic move (section 15.3), cancellation and cleanup (section 16), and resource limits (SEC-011) apply unchanged.
@@ -1327,6 +1328,8 @@ python scripts/video_to_gif.py preview \
   --json
 
 The preview command MUST accept --input or --manifest, --at, --output-name, --output-directory, --config, --collision-policy, --allow-outside-project, --allow-upscale, --dry-run, --json, every transformation flag in section 12.10, and the remote source flags of section 12.8.
+
+--at and --manifest are mutually exclusive: --at selects a single frame from a single source, while a manifest supplies its own per-clip start timestamps. Supplying both MUST fail with error code INVALID_USAGE and exit code 2.
 
 It MUST also accept --profile, --fps, --colors, and --loop so that a preview can be requested with the same settings as the GIF it previews. The settings that do not apply to a still frame are ignored with a warning under FR-029 rather than rejected.
 

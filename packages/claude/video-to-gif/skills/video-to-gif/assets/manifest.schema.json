@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://video-to-gif.dev/schemas/manifest.schema.json",
   "title": "video-to-gif JSON manifest",
-  "description": "Schema for JSON batch manifests (spec section 10). Manifest values are treated purely as data: no shell expressions, no environment expansion, no command substitution, no code (spec SEC-009). Unknown fields/columns are warned about rather than rejected, so additionalProperties is left permissive.",
+  "description": "Schema for JSON batch manifests (spec section 10). Manifest values are treated purely as data: no shell expressions, no environment expansion, no command substitution, no code (spec SEC-009). Unknown fields/columns are warned about rather than rejected, so additionalProperties is left permissive. The v0.3.0 transformation fields (crop, width, height, speed, dither, bayerScale) may appear at the top level, at the clip level, or both; every transformation parameter is an integer, a bounded decimal, or a member of a fixed enumeration, and no free text, filter string, filter-graph fragment, or FFmpeg expression is ever accepted (SEC-018). All of them are optional and additive, so schemaVersion remains 1.",
   "type": "object",
   "required": ["schemaVersion", "input", "clips"],
   "properties": {
@@ -32,14 +32,19 @@
       "enum": ["fail", "overwrite", "unique", "skip"]
     },
     "width": { "$ref": "#/$defs/width" },
+    "height": { "$ref": "#/$defs/height" },
     "fps": { "$ref": "#/$defs/fps" },
     "colors": { "$ref": "#/$defs/colors" },
     "allowUpscale": {
       "description": "When true, the engine may upscale a source narrower than the profile maximum width. Off by default.",
       "type": "boolean"
     },
+    "crop": { "$ref": "#/$defs/crop" },
+    "speed": { "$ref": "#/$defs/speed" },
+    "dither": { "$ref": "#/$defs/dither" },
+    "bayerScale": { "$ref": "#/$defs/bayerScale" },
     "clips": {
-      "description": "One or more clip definitions. Clip-level fields override top-level fields.",
+      "description": "One or more clip definitions. Clip-level fields override top-level fields. For transformation fields (crop, width, height, speed, dither, bayerScale) a clip-level value also overrides the corresponding command-line flag for that clip, because a per-clip value is more specific than a batch-wide flag (spec FR-024, refining section 9.3).",
       "type": "array",
       "minItems": 1,
       "items": { "$ref": "#/$defs/clip" }
@@ -79,9 +84,53 @@
       "enum": ["small", "balanced", "high", "custom"]
     },
     "width": {
-      "description": "Maximum output width in pixels (aspect ratio preserved; no upscaling by default).",
+      "description": "Maximum output width in pixels, 2 to 8192 (spec FR-026). Aspect ratio preserved; no upscaling by default. An explicit width overrides the effective quality profile's maximum width and is honored exactly, including odd values (GIF is palette-based and has no even-dimension constraint); a dimension derived from it is rounded to an even value. Out of range fails with INVALID_DIMENSIONS (exit 6).",
       "type": "integer",
-      "minimum": 1
+      "minimum": 2,
+      "maximum": 8192
+    },
+    "height": {
+      "description": "Maximum output height in pixels, 2 to 8192 (spec FR-026, new in v0.3.0). When both width and height are supplied the frame is scaled to the largest size fitting inside that box with the aspect ratio preserved; the frame is never stretched. Out of range fails with INVALID_DIMENSIONS (exit 6).",
+      "type": "integer",
+      "minimum": 2,
+      "maximum": 8192
+    },
+    "crop": {
+      "description": "Crop rectangle in orientation-normalized source pixels (spec FR-025), applied before scaling. x and y are the offsets of the rectangle's top-left corner. Either an object with exactly x, y, width, height, or the string form 'x:y:width:height' (four unsigned decimal integers, exactly three colons, no signs or exponent notation). Each component is 0..65535; width and height are at least 2; the rectangle must lie inside the orientation-normalized source frame, which is checked during preflight. A crop rectangle is NOT permitted in project configuration. Invalid values fail with INVALID_CROP (exit 6).",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["x", "y", "width", "height"],
+          "additionalProperties": false,
+          "properties": {
+            "x": { "type": "integer", "minimum": 0, "maximum": 65535 },
+            "y": { "type": "integer", "minimum": 0, "maximum": 65535 },
+            "width": { "type": "integer", "minimum": 2, "maximum": 65535 },
+            "height": { "type": "integer", "minimum": 2, "maximum": 65535 }
+          }
+        },
+        {
+          "type": "string",
+          "pattern": "^[0-9]+:[0-9]+:[0-9]+:[0-9]+$"
+        }
+      ]
+    },
+    "speed": {
+      "description": "Playback speed multiplier, 0.25 to 4.0 with at most three fractional digits (spec FR-027). 1.0 leaves timing unchanged; above 1.0 is faster, below 1.0 is slower. Implemented by retiming presentation timestamps: the selected source range is unchanged and the output GIF duration becomes round(durationMs / speed). No frames are interpolated. Invalid values fail with INVALID_SPEED (exit 6).",
+      "type": "number",
+      "minimum": 0.25,
+      "maximum": 4.0
+    },
+    "dither": {
+      "description": "Palette-use dither mode (spec FR-028). Comparison is case-sensitive after trimming surrounding whitespace. When omitted, the effective quality profile's default applies (section 15.5): bayer with bayerScale 5 for 'small', sierra2_4a for 'balanced', 'high', and 'custom'. Invalid values fail with INVALID_DITHER (exit 6).",
+      "type": "string",
+      "enum": ["none", "bayer", "floyd_steinberg", "sierra2", "sierra2_4a"]
+    },
+    "bayerScale": {
+      "description": "Bayer matrix scale, 0 to 5 (spec FR-028). Meaningful only when the effective dither mode is 'bayer'; supplying it explicitly under any other effective mode fails with INVALID_DITHER (exit 6), as does a value outside 0..5. A higher scale gives a coarser pattern, better compression, and more banding.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 5
     },
     "fps": {
       "description": "Target frames per second (capped at the source frame rate).",
@@ -110,9 +159,14 @@
         "duration": { "$ref": "#/$defs/duration" },
         "profile": { "$ref": "#/$defs/profile" },
         "width": { "$ref": "#/$defs/width" },
+        "height": { "$ref": "#/$defs/height" },
         "fps": { "$ref": "#/$defs/fps" },
         "colors": { "$ref": "#/$defs/colors" },
-        "loop": { "$ref": "#/$defs/loop" }
+        "loop": { "$ref": "#/$defs/loop" },
+        "crop": { "$ref": "#/$defs/crop" },
+        "speed": { "$ref": "#/$defs/speed" },
+        "dither": { "$ref": "#/$defs/dither" },
+        "bayerScale": { "$ref": "#/$defs/bayerScale" }
       },
       "anyOf": [
         {

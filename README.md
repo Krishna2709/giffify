@@ -14,21 +14,29 @@ validating timestamps, inspecting media, planning outputs, running FFmpeg's
 two-pass palette pipeline, and returning structured results. It never prompts.
 
 > Normative specification: [`versioned_technical_spec.md`](versioned_technical_spec.md)
-> (VTG-TS-001, v0.2.0-draft.1). When this README and the spec disagree, the spec wins.
+> (VTG-TS-001, v0.3.0-draft.1). When this README and the spec disagree, the spec wins.
 
-## Status: 0.1.0 released; 0.2.0 in development
+## Status: 0.2.0 released; 0.3.0 in development
 
-Version 0.1.0 is released. **Version 0.2.0 — opt-in remote source acquisition —
-is in development on this branch**; its interfaces track the spec but are **not
-yet stable**, and a few items remain open decisions (exact profile values and
-others — spec §26). Do not treat 0.2.0 as production-ready until it is tagged and
+Versions 0.1.0 and 0.2.0 are released. **Version 0.3.0 — transformations
+(crop, explicit resize, playback speed, dithering) and PNG preview frames — is in
+development on this branch**; its interfaces track the spec but are **not yet
+stable**, and a few items remain open decisions (exact profile values and
+others — spec §26). Do not treat 0.3.0 as production-ready until it is tagged and
 published.
 
-Conversion is **local by default**. Version 0.2.0 adds **opt-in, download-only**
+Conversion is **local by default**. Version 0.2.0 added **opt-in, download-only**
 remote source acquisition (direct `http`/`https` media URLs, plus an optional
 never-bundled yt-dlp adapter for video-page URLs). It is **disabled by default**:
 with the default configuration a URL is rejected with `REMOTE_DISABLED` and no
 network access occurs (spec §25.2, FR-018). See [Remote sources](#remote-sources-opt-in).
+
+Version 0.3.0 adds per-clip **transformations** and a `preview` command
+(spec §25.3, FR-024..FR-030). Every transformation parameter is an integer, a
+bounded decimal, or a member of a fixed enumeration — no user-supplied text ever
+reaches an FFmpeg filter graph (SEC-018). Captions and subtitle burn-in are
+deliberately excluded and deferred to 0.4.0. See
+[Transformations](#transformations).
 
 ## Requirements
 
@@ -213,18 +221,104 @@ Video-page (watch) URLs require the optional, never-bundled `yt-dlp` adapter via
 `--remote-adapter ytdlp`; when it is absent the engine reports `YTDLP_MISSING`
 (exit 3). See [`references/remote-sources.md`](src/skill/video-to-gif/references/remote-sources.md).
 
+## Transformations
+
+`create`, `batch`, and `preview` accept the same additive transformation flags
+(spec §12.10):
+
+| Flag | Value | Meaning |
+| --- | --- | --- |
+| `--crop <x>:<y>:<w>:<h>` | Four unsigned integers | Crop rectangle in orientation-normalized source pixels, applied **before** scaling |
+| `--width <pixels>` | 2 to 8192 | Maximum output width (aspect ratio preserved) |
+| `--height <pixels>` | 2 to 8192 | Maximum output height (aspect ratio preserved) |
+| `--speed <multiplier>` | 0.25 to 4.0 | Playback multiplier; retimes only, never re-cuts the range |
+| `--dither <mode>` | `none`, `bayer`, `floyd_steinberg`, `sierra2`, `sierra2_4a` | Palette-use dither mode |
+| `--bayer-scale <n>` | 0 to 5 | Bayer matrix scale, for `--dither bayer` |
+
+An invalid value is rejected in preflight — before any FFmpeg process starts —
+with `INVALID_CROP`, `INVALID_DIMENSIONS`, `INVALID_SPEED`, or `INVALID_DITHER`
+and exit code 6.
+
+### Crop a region and bound its width
+
+```
+python scripts/video_to_gif.py create \
+  --input "./videos/demo.mp4" \
+  --start "00:01:00" \
+  --end "00:01:05" \
+  --crop 320:180:1280:720 \
+  --width 640 \
+  --json
+```
+
+On a 1920x1080 source this keeps a 1280x720 region and writes a 640x360 GIF.
+Because the crop is applied first, the profile maximum, aspect-ratio
+preservation, and the no-upscale rule all apply to the **cropped** rectangle.
+
+### Speed a clip up
+
+```
+python scripts/video_to_gif.py create \
+  --input "./videos/demo.mp4" \
+  --start "00:00:04" \
+  --duration 4 \
+  --speed 2.0 \
+  --json
+```
+
+The selected source range is unchanged; the GIF duration becomes
+`round(durationMs / speed)` — here a 4000 ms range yields an ~2000 ms GIF. No
+frames are interpolated: speeding up drops frames, slowing down duplicates them.
+
+### Preview a still frame before encoding
+
+```
+python scripts/video_to_gif.py preview \
+  --input "./videos/demo.mp4" \
+  --at "00:01:02.500" \
+  --crop 320:180:1280:720 \
+  --width 640 \
+  --json
+```
+
+`preview` writes a single **full-colour PNG** (never palette-quantized) so
+framing can be confirmed before committing to a conversion.
+`preview --manifest "./clips.json"` produces one still per clip at that clip's
+start timestamp. A preview is reported in a separate `previews` array, never
+counted as a created GIF. Temporal and palette settings (`speed`, `fps`, `loop`,
+`colors`, `dither`, `bayerScale`) are accepted but ignored for a still and
+produce a `TRANSFORMATION_NOT_APPLICABLE` warning.
+
+### Per-clip transformations
+
+Every transformation field also works at the top level and per clip in a JSON or
+CSV manifest. For transformations, a **clip-level field beats a batch-wide
+command-line flag** (spec FR-024), so `batch --speed 0.5` applies only to clips
+that do not set their own `speed`. See
+[`references/transformations.md`](src/skill/video-to-gif/references/transformations.md)
+and [`examples/`](examples).
+
 ## Quality profiles
 
 Widths are **maximums**, not forced widths. The engine preserves source aspect
 ratio and does not upscale by default. When the source frame rate is below the
 target, the effective frame rate does not exceed the source (spec §8, FR-014).
 
-| Profile  | Max width | Target FPS | Max colors | Intended use                     |
-| -------- | --------- | ---------- | ---------- | -------------------------------- |
-| small    | 480 px    | 10         | 128        | Documentation and messaging      |
-| balanced | 640 px    | 15         | 256        | General default                  |
-| high     | 960 px    | 20         | 256        | Detailed product or UI motion    |
-| custom   | user-set  | user-set   | user-set   | Advanced control                 |
+| Profile  | Max width | Target FPS | Max colors | Default dither     | Intended use                     |
+| -------- | --------- | ---------- | ---------- | ------------------ | -------------------------------- |
+| small    | 480 px    | 10         | 128        | `bayer` (scale 5)  | Documentation and messaging      |
+| balanced | 640 px    | 15         | 256        | `sierra2_4a`       | General default                  |
+| high     | 960 px    | 20         | 256        | `sierra2_4a`       | Detailed product or UI motion    |
+| custom   | user-set  | user-set   | user-set   | `sierra2_4a`       | Advanced control                 |
+
+An explicit `--width` or `--height` **overrides** the profile's maximum width — a
+profile maximum is a default bound, not a ceiling on explicit requests — and is
+honored exactly, odd values included (GIF is palette-based, so there is no
+even-dimension constraint); a dimension *derived* from an explicit bound is
+rounded to even. Upscaling stays gated by `--allow-upscale`; without it an
+oversized request is clamped back to the effective source size and warns with
+`UPSCALE_NOT_ALLOWED`. Profile dither defaults reproduce 0.1.0/0.2.0 output, so a
+job that specifies no dither is unchanged from earlier releases (spec §15.5).
 
 > Exact profile values are provisional pending benchmark testing (spec §26 open
 > decision 5).
