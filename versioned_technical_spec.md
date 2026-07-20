@@ -4,8 +4,8 @@ Versioned Technical Specification
 
 Field	Value
 Document ID	VTG-TS-001
-Specification version	0.2.0-draft.1
-Product version	0.2.0
+Specification version	0.3.0-draft.1
+Product version	0.3.0
 Status	Draft for implementation
 Date	July 12, 2026
 Target agents	Claude Code and OpenAI Codex
@@ -28,6 +28,10 @@ The first release supports deterministic, timestamp-based conversion. Users must
 * A JSON manifest.
 
 The source video is a local file by default. Beginning with version 0.2.0, the source MAY instead be a remote HTTP or HTTPS URL. Remote source acquisition is disabled by default and is gated by explicit enablement and approval (see FR-018 and section 17).
+
+Beginning with version 0.3.0, a selected range MAY additionally be transformed while it is converted. Version 0.3.0 supports cropping, explicit resizing, playback-speed adjustment, and explicit dithering control, and it can extract a single still preview frame instead of a GIF. Every transformation parameter is a number or a member of a fixed enumeration; free text is never accepted. Transformations are specified normatively in FR-024 through FR-030 and SEC-018.
+
+Text captions and subtitle burn-in are not part of version 0.3.0 and are specified for a later release (section 3.3 and section 25.4).
 
 The implementation will consist of:
 
@@ -86,24 +90,36 @@ The product SHOULD:
 5. make filesystem and network operations explicit.
 6. support future transformations without breaking the initial interface.
 
-3.3 Non-goals for version 0.2.0
+3.3 Non-goals for version 0.3.0
 
-Version 0.2.0 will not include:
+Version 0.3.0 will not include:
 
 * Automatic highlight or interesting-moment detection.
 * Multimodal video understanding.
 * Transcript-based clip selection.
 * Authenticated cloud-storage or provider-account integrations, including Google Drive private files, private S3, GCS, or Azure objects, and authenticated Dropbox files.
-* Captions or subtitle rendering.
-* Cropping.
-* Playback-speed changes.
+* Captions, text overlays, or subtitle rendering, including subtitle burn-in and embedded subtitle streams.
+* Non-uniform resizing that changes the aspect ratio of the selected region.
+* Geometric transformations other than cropping and uniform scaling, including rotation, flipping, and perspective correction.
+* Arbitrary user-supplied FFmpeg filter strings, filter-graph fragments, filter scripts, or expressions.
+* Transparent-background or alpha-channel handling.
 * Exact target-file-size optimization.
 * A hosted conversion service.
 * An MCP server.
 * DRM bypass or access-control circumvention.
 * Uploading source videos, generated GIFs, frames, metadata, or filenames to any remote endpoint. Remote access is download-only.
 
-Version 0.2.0 adds opt-in remote source acquisition for direct HTTP and HTTPS media URLs, with an optional yt-dlp adapter for video-page URLs. Remote acquisition is disabled by default and is specified normatively in FR-018 through FR-023 and SEC-012 through SEC-017. Authenticated provider integrations remain planned for a later release.
+Version 0.2.0 added opt-in remote source acquisition for direct HTTP and HTTPS media URLs, with an optional yt-dlp adapter for video-page URLs. Remote acquisition is disabled by default and is specified normatively in FR-018 through FR-023 and SEC-012 through SEC-017. Authenticated provider integrations remain planned for a later release.
+
+Version 0.3.0 adds cropping, explicit resizing, playback-speed adjustment, dithering control, preview frames, and per-clip transformation settings, specified normatively in FR-024 through FR-030, SEC-018, sections 9.6, 10.4, 12.9, 12.10, 13.4, 15.2, 15.5, 22.7, and the version 0.3.0 acceptance criteria in section 23.
+
+Captions and subtitle burn-in are deferred to version 0.4.0 (section 25.4) because they raise three problems that no version 0.3.0 transformation raises:
+
+1. Font resolution. Rendering text requires locating a usable font file on macOS, Windows, and Linux, handling missing fonts, font-family fallback, and the licensing of any bundled font. Version 0.3.0 introduces no font dependency.
+2. Escaping and injection surface. Caption text is free user text that must reach an FFmpeg filter argument, which requires a dedicated escaping design and a security review beyond SEC-018. Every version 0.3.0 transformation parameter is numeric or a fixed enum and is re-serialized by the engine from validated values, so no free text ever reaches a filter graph.
+3. Subtitle formats. Burn-in requires parsing external subtitle files (SRT, ASS or SSA, WebVTT) and selecting embedded subtitle streams. Each format is an additional untrusted-input parser with its own styling model, and ASS in particular carries its own scripting and rendering surface.
+
+Deferral keeps the version 0.3.0 filter graph free of user-supplied text.
 
 ⸻
 
@@ -218,11 +234,13 @@ video-to-gif-agent/
 │           │       ├── naming.py
 │           │       ├── paths.py
 │           │       ├── progress.py
-│           │       └── timestamps.py
+│           │       ├── timestamps.py
+│           │       └── transforms.py
 │           ├── references/
 │           │   ├── configuration.md
 │           │   ├── input-formats.md
 │           │   ├── quality-profiles.md
+│           │   ├── transformations.md
 │           │   ├── installation.md
 │           │   └── troubleshooting.md
 │           └── assets/
@@ -320,7 +338,10 @@ The doctor command MUST verify:
 * ffprobe is executable.
 * The palettegen filter exists.
 * The paletteuse filter exists.
+* The crop filter exists.
+* The setpts filter exists.
 * GIF encoding is available.
+* PNG encoding is available, because preview frames depend on it (FR-029).
 * The temporary directory is writable.
 * The requested output directory is writable, when supplied.
 
@@ -352,11 +373,11 @@ Proposed metadata:
 
 ---
 name: video-to-gif
-description: Convert explicit timestamp ranges from local video files into one or more optimized animated GIFs. Use when a user asks to create a GIF from a video, extract timestamped clips as GIFs, batch-generate GIFs from CSV or JSON timestamp manifests, or convert a remote video URL when remote sources are enabled.
+description: Convert explicit timestamp ranges from local video files into one or more optimized animated GIFs, optionally cropped, resized, speed-adjusted, or dithered. Use when a user asks to create a GIF from a video, extract timestamped clips as GIFs, batch-generate GIFs from CSV or JSON timestamp manifests, crop or resize or speed up a clip, preview a still frame before making a GIF, or convert a remote video URL when remote sources are enabled.
 license: LICENSE
-compatibility: Requires Python 3.10+, ffmpeg, and ffprobe. Supports macOS, Windows, and Linux. Version 0.2.0 processes local video files by default and can optionally acquire remote HTTP or HTTPS source URLs when remote sources are explicitly enabled.
+compatibility: Requires Python 3.10+, ffmpeg, and ffprobe. Supports macOS, Windows, and Linux. Version 0.3.0 processes local video files by default, can optionally acquire remote HTTP or HTTPS source URLs when remote sources are explicitly enabled, and supports cropping, explicit resizing, playback-speed adjustment, dithering control, and PNG preview frames. Captions and subtitle burn-in are not supported.
 metadata:
-  product-version: "0.2.0"
+  product-version: "0.3.0"
   specification: "VTG-TS-001"
 ---
 
@@ -589,6 +610,8 @@ The engine MUST NOT upscale by default.
 
 When source frame rate is lower than the requested GIF frame rate, the effective frame rate SHOULD not exceed the source frame rate.
 
+From version 0.3.0, these rules are evaluated against the effective source geometry rather than the raw frame: when a crop is applied, the cropped rectangle supplies the aspect ratio and the dimensions against which upscaling is judged (FR-025), an explicit width or height overrides the profile maximum width while leaving the no-upscale rule in force (FR-026), and for a speed multiplier below 1.0 the source frame rate used by the last rule is the source frame rate multiplied by that speed (FR-027). The meaning of this requirement is otherwise unchanged.
+
 FR-015: Looping
 
 The default output MUST loop forever.
@@ -712,6 +735,191 @@ The engine MUST emit download progress as progress events on standard error usin
 
 Any URL echoed in the structured result, warnings, progress events, or errors MUST be redacted under SEC-015.
 
+FR-024: Transformation model
+
+Version 0.3.0 defines four clip transformations — cropping (FR-025), explicit resizing (FR-026), playback-speed adjustment (FR-027), and dithering control (FR-028) — and one additional output mode, preview frame extraction (FR-029).
+
+Every transformation parameter MUST be an integer, a bounded decimal, or a member of a fixed enumeration. The engine MUST NOT accept free text, FFmpeg filter strings, filter-graph fragments, filter scripts, expressions, or option key-value pairs as transformation input from any source (SEC-018).
+
+Transformation values are resolvable from the command line, from a manifest, and from project configuration. For a given clip, the effective value of each transformation parameter MUST be resolved in this order, highest priority first:
+
+1. The clip-level manifest field.
+2. The command-line flag.
+3. The top-level manifest field.
+4. Project configuration.
+5. The built-in default.
+
+This refines section 9.3 for transformations only: a clip-level manifest field is more specific than a batch-wide command-line flag and MUST win, consistent with the clip-level override rule of section 10.3. All other configuration continues to follow section 9.3 unchanged.
+
+Every transformation parameter MUST be parsed, validated, and range-checked during preflight (section 15.1), before any FFmpeg process is started. An invalid transformation MUST produce the specific error code defined in FR-025 through FR-028 with exit code 6 and status validation_failed, and MUST reject the job in the same way an invalid timestamp does under the default policy of FR-007.
+
+The --invalid-timestamp-policy values skip and clamp apply to timestamps only. The engine MUST NOT clamp, round, re-center, or otherwise silently correct an invalid transformation value.
+
+When no transformation is specified, the engine MUST produce output that is functionally equivalent to version 0.2.0 output for the same source, range, profile, and configuration (NFR-002, NFR-006).
+
+The effective transformations for every clip MUST be reported in the structured result (FR-030).
+
+FR-025: Cropping
+
+A crop rectangle selects a sub-rectangle of the source frame. It MUST be expressed as four integers in orientation-normalized source pixels: x, y, width, and height, where x and y are the offsets of the rectangle's top-left corner from the top-left corner of the orientation-normalized frame.
+
+Accepted forms:
+
+* Command line: --crop <x>:<y>:<width>:<height>, four unsigned decimal integers separated by colons, with no spaces, signs, or exponent notation.
+* JSON manifest: either an object with exactly the keys x, y, width, and height, each an integer, or the same colon-separated string form.
+* CSV manifest: the colon-separated string form in a crop column.
+
+Validation MUST reject the following with error code INVALID_CROP and exit code 6:
+
+* A value that is not an unsigned decimal integer, or a string form that does not contain exactly four colon-separated fields.
+* An object form missing any of the four keys, or containing any other key.
+* Any value outside the range 0 through 65535.
+* width < 2 or height < 2.
+* x + width > effective source width, or y + height > effective source height.
+* A crop rectangle supplied in project configuration (section 9.6).
+
+The rectangle MUST be validated against the orientation-normalized source dimensions reported by inspection (FR-002), not the raw coded dimensions, so that a rotated source is cropped in the geometry the user sees.
+
+The engine MUST apply the requested rectangle exactly. It MUST NOT round, clamp, re-center, or expand the rectangle. When the decoded pixel format cannot represent the requested offsets exactly, the engine MUST convert the frame to a non-subsampled pixel format before cropping rather than adjusting the rectangle.
+
+Cropping MUST occur before scaling (section 15.2). After cropping, the cropped rectangle is the effective source geometry for every later step:
+
+* Aspect-ratio preservation under FR-014 applies to the cropped rectangle, not to the original frame. Cropping is the only supported way to change the output aspect ratio.
+* Profile maximum widths under FR-014 apply to the cropped width. When the cropped width is already at or below the effective maximum width, the cropped width is retained and no upscaling occurs.
+* The no-upscale rule of FR-014 is evaluated against the cropped dimensions (FR-026).
+
+FR-026: Explicit resizing
+
+The engine MUST support two output dimension bounds:
+
+* width: the maximum output width in pixels. This flag and field existed in version 0.1.0 and its meaning is unchanged.
+* height: the maximum output height in pixels. New in version 0.3.0.
+
+Both MUST be integers in the closed range 2 through 8192. Any other value MUST be rejected with error code INVALID_DIMENSIONS and exit code 6.
+
+Resolution rules:
+
+* An explicit width or height MUST override the maximum width of the effective quality profile (FR-014). A profile maximum is a default bound, not a ceiling on explicit requests.
+* When only width is supplied, height MUST be derived from the effective source aspect ratio.
+* When only height is supplied, width MUST be derived from the effective source aspect ratio.
+* When both are supplied, the frame MUST be scaled to the largest size that satisfies both bounds while preserving the effective source aspect ratio, so that output width <= width and output height <= height. Non-uniform scaling that changes the aspect ratio MUST NOT be performed (section 3.3).
+* The effective source aspect ratio is the aspect ratio of the cropped rectangle when a crop is applied (FR-025), otherwise the orientation-normalized source aspect ratio.
+
+Upscaling:
+
+* When the resolved output dimensions would exceed the effective source dimensions and allowUpscale is not set, the engine MUST clamp the output to the effective source dimensions. This preserves the version 0.1.0 behavior of --width.
+* The UPSCALE_NOT_ALLOWED warning MUST be emitted only when the clamped bound was explicitly supplied as width or height. A profile maximum width that simply exceeds a small source MUST NOT produce a warning, so profile-only jobs emit exactly the warnings they emitted in version 0.2.0.
+* When allowUpscale is set through --allow-upscale or the manifest allowUpscale field, the resolved dimensions MUST be honored up to the 8192 bound.
+* Upscaling MUST NOT be inferred from the presence of --width or --height.
+
+Dimension parity:
+
+* An explicitly supplied width or height MUST be honored exactly, including odd values. GIF is a palette-based format without chroma subsampling, so it imposes no even-dimension constraint, and rounding an explicit bound would silently contradict the user's request.
+* A dimension derived automatically from the other dimension MUST remain even, preserving the version 0.1.0 scaling behavior for profile-only and single-bound invocations.
+* When neither width nor height is supplied, dimension derivation is unchanged from version 0.1.0, so that profile-only invocations produce the same dimensions as earlier versions.
+* No output dimension may be smaller than 2.
+
+The resolved dimensions MUST be deterministic for the same source, crop, profile, and bounds (NFR-002) and MUST be reported (FR-030).
+
+FR-027: Playback-speed adjustment
+
+The speed parameter is a decimal multiplier applied to the playback rate of the selected range. A value of 1.0 leaves timing unchanged, a value greater than 1.0 makes playback faster, and a value less than 1.0 makes playback slower.
+
+speed MUST be a decimal number in the closed range 0.25 through 4.0 with at most three fractional digits. Values outside the range, zero, negative values, non-numeric values, values in exponent notation, and values with more than three fractional digits MUST be rejected with error code INVALID_SPEED and exit code 6.
+
+The engine MUST implement speed adjustment by retiming presentation timestamps, using a setpts expression constructed from the validated numeric value (SEC-018). The engine MUST NOT change the selected source range: the start position and source duration resolved under FR-004 through FR-006 are unaffected by speed.
+
+Duration:
+
+* The output GIF duration MUST be the selected source duration divided by the speed multiplier: outputDurationMs = round(clipDurationMs / speed).
+* A 4000 ms range at speed 2.0 therefore produces an approximately 2000 ms GIF, and the same range at speed 0.5 produces an approximately 8000 ms GIF.
+* Both the source range duration and the output duration MUST be reported (FR-030).
+* Accuracy expectations are defined in section 15.4.
+
+Frame behavior:
+
+* Speed retiming MUST be applied before frame-rate conversion (section 15.2), so the requested output frame rate describes the finished GIF.
+* The engine MUST NOT synthesize interpolated frames. Speeding up drops frames and slowing down duplicates frames.
+* For speed values below 1.0, the retimed stream's intrinsic frame rate is the source frame rate multiplied by speed. The effective output frame rate SHOULD NOT exceed that value, consistent with the source-frame-rate rule of FR-014.
+
+Audio is not relevant: GIF output has no audio stream (section 15.4). Speed adjustment MUST NOT attempt audio retiming, and the engine MUST continue to disable audio in every FFmpeg invocation.
+
+FR-028: Dithering control
+
+The palette-use dither mode becomes a public option in version 0.3.0.
+
+The dither field MUST accept exactly one of the following values:
+
+Value	Behavior	Size and quality guidance
+none	No dithering	Smallest files; visible banding on gradients
+bayer	Ordered dithering with a Bayer matrix	Small files, deterministic pattern; a higher bayerScale gives a coarser pattern, better compression, and more banding
+floyd_steinberg	Floyd-Steinberg error diffusion	Good gradients; larger files and more inter-frame noise
+sierra2	Sierra-2 error diffusion	Similar to floyd_steinberg with slightly softer noise
+sierra2_4a	Sierra-2-4A error diffusion	FFmpeg's default; the general-purpose quality and size balance
+
+The bayerScale field MUST be an integer in the closed range 0 through 5 and is meaningful only when the effective dither mode is bayer.
+
+Validation MUST reject the following with error code INVALID_DITHER and exit code 6:
+
+* Any dither value that is not a member of the enumeration after surrounding whitespace is trimmed. Comparison MUST be case-sensitive against the lowercase names above.
+* Any bayerScale value that is not an integer in the range 0 through 5.
+* An explicitly supplied bayerScale when the effective dither mode is not bayer.
+
+The error message for an invalid dither value MUST list the permitted values.
+
+Defaults:
+
+* When dither is not supplied at any precedence level, the effective quality profile's default dither mode applies (section 15.5).
+* bayerScale is resolved independently through the same precedence chain as dither (FR-024). When the effective mode is bayer and no bayerScale is supplied, the effective profile's default bayerScale applies; when the effective profile default mode is not bayer, bayerScale defaults to 2.
+
+The engine MUST construct the paletteuse dither argument from the validated enum member and the validated integer only, never from the user-supplied text (SEC-018). Compatibility rules for dither values are defined in section 15.5.
+
+FR-029: Preview frames
+
+The engine MUST provide a preview command that extracts a single still image instead of producing a GIF, so a user can confirm framing before committing to a conversion.
+
+Two forms MUST be supported:
+
+* A single timestamp: preview --input <source> --at <timestamp>, with optional transformation flags.
+* A manifest: preview --manifest <manifest>, which MUST produce one still per clip at that clip's start timestamp using that clip's effective transformations.
+
+Requirements:
+
+* The output format MUST be PNG in full colour. Preview output MUST NOT be palette-quantized, so preview fidelity is not limited by GIF colour reduction.
+* The --at value MUST be a timestamp in an FR-004 format and MUST satisfy 0 <= at < source duration. A value outside that range MUST be rejected with error code INVALID_TIMESTAMP and exit code 6.
+* Orientation normalization, cropping (FR-025), and resizing (FR-026) MUST be applied exactly as they would be for a GIF of the same clip with the same settings, including the profile maximum width and the upscale rules.
+* The temporal and palette settings speed, fps, loop, colors, dither, and bayerScale do not apply to a still frame. When supplied, they MUST be accepted, MUST NOT change the extracted image, and MUST produce one warning per invocation whose message begins with the token TRANSFORMATION_NOT_APPLICABLE and names the ignored settings.
+* Output naming: a user-supplied --output-name MUST be a bare filename with no path separators, sanitized under FR-011. Every FR-011 rule applies with .png substituted for .gif, so preview names exclude characters invalid on Windows, prevent directory traversal, avoid reserved Windows device names, remain deterministic, preserve the timestamp suffix when shortening is required, and stay within the safe filename length. When the supplied name has no extension, .png MUST be appended; when it has an extension other than .png, the command MUST fail with error code INVALID_USAGE and exit code 2. A generated name MUST follow <video-stem>_<at>.png, for example product-demo_00-01-02.500.png. In the manifest form, a named clip MUST produce <clip-name>_<start>.png.
+* The output directory (FR-010), project-boundary rules (SEC-003), and collision policies (FR-012) apply unchanged, including the default collision policy fail. A preview MUST NOT overwrite an existing file by default.
+* Temporary output, verification, and atomic move (section 15.3), cancellation and cleanup (section 16), and resource limits (SEC-011) apply unchanged.
+* preview MUST support --dry-run with the preflight semantics of section 12.5: resolve names, detect collisions, and produce no files.
+* preview MUST accept a remote source under the same enablement, approval, and cleanup rules as FR-018 through FR-021.
+* A preview MUST NOT be counted as a created GIF. Preview results MUST appear in a separate previews array, MUST NOT appear in created, and MUST NOT be included in summary.created (section 13.4).
+* A failed preview MUST be reported in failed with its stage and error code, and the summary MUST reflect it as a failure rather than a created output.
+
+FR-030: Transformation and preview reporting
+
+The structured result MUST report the transformations that were actually applied, so the agent can summarize accurately without re-deriving them.
+
+Every entry in created MUST include:
+
+* transformations.crop: the applied rectangle as an object with x, y, width, and height, or null when no crop was applied.
+* transformations.sourceWidth and transformations.sourceHeight: the orientation-normalized source dimensions.
+* transformations.effectiveSourceWidth and transformations.effectiveSourceHeight: the dimensions after cropping, equal to the source dimensions when no crop was applied.
+* transformations.speed: the effective speed multiplier as a number.
+* transformations.dither: the effective dither mode.
+* transformations.bayerScale: the effective Bayer scale, or null when the effective mode is not bayer.
+* transformations.upscaled: true when the output exceeds the effective source dimensions under an explicit allowUpscale, otherwise false.
+* outputDurationMs: the duration of the generated GIF, equal to round(durationMs / speed).
+
+The existing width, height, and fps fields continue to report the effective output values, and durationMs continues to report the selected source range duration. Their meanings are unchanged from version 0.1.0.
+
+Every entry in previews MUST include path, atMs, width, height, sizeBytes, and the same transformations object, with speed reported as 1.0 and dither and bayerScale reported as null.
+
+The summary object MUST include a previews count. When a transformation was clamped, adjusted, or ignored, the corresponding warning MUST appear in warnings.
+
+All of these fields are additive. The structured result schemaVersion remains 1 (section 13).
+
 ⸻
 
 9. Project configuration
@@ -741,6 +949,13 @@ Example:
   "allowOutsideProject": false,
   "remoteSources": "disabled",
   "keepRemoteSource": false,
+  "transformations": {
+    "width": null,
+    "height": null,
+    "speed": 1.0,
+    "dither": null,
+    "bayerScale": null
+  },
   "limits": {
     "maxClipProcessingSeconds": 600,
     "maxTemporaryBytes": 2147483648,
@@ -757,6 +972,8 @@ Highest priority first:
 2. Request-specific user instruction.
 3. Project configuration.
 4. Built-in default.
+
+For transformation parameters only, a clip-level manifest field ranks above a command-line argument, because a per-clip value is more specific than a batch-wide flag (FR-024, section 10.4). All other settings follow the order above unchanged.
 
 9.4 Configuration restrictions
 
@@ -786,6 +1003,31 @@ The limits object MUST support:
 
 * maxDownloadBytes: the maximum size of a single remote download, enforced during streaming. Default 2147483648.
 * maxDownloadSeconds: the download wall-clock timeout, in seconds. Default 900.
+
+These fields are additive and do not change the configuration schemaVersion. A configuration that omits them MUST behave as though the documented defaults were supplied.
+
+9.6 Transformation configuration
+
+Project configuration MAY define global transformation defaults in a transformations object:
+
+{
+  "transformations": {
+    "width": null,
+    "height": null,
+    "speed": 1.0,
+    "dither": null,
+    "bayerScale": null
+  }
+}
+
+* width and height are the dimension bounds of FR-026. A null value means the effective quality profile's maximum width applies.
+* speed MUST default to 1.0 and MUST satisfy FR-027.
+* dither MUST default to null, meaning the effective profile's default mode (section 15.5), and MUST satisfy FR-028.
+* bayerScale MUST default to null and MUST satisfy FR-028.
+
+Configuration MUST NOT define a crop rectangle. A crop rectangle is only meaningful against a specific source's dimensions, so it MUST be supplied per request or per clip (FR-025). A crop key inside transformations MUST be rejected by validate-config as a validation error with the field path transformations.crop.
+
+validate-config MUST apply every source-independent check in FR-026 through FR-028, including enum membership and numeric ranges. Source-dependent checks, namely crop bounds and upscale evaluation, occur during preflight (section 15.1).
 
 These fields are additive and do not change the configuration schemaVersion. A configuration that omits them MUST behave as though the documented defaults were supplied.
 
@@ -839,20 +1081,73 @@ Top level:
 * continueOnError.
 * collisionPolicy.
 * width.
+* height.
 * fps.
 * colors.
 * allowUpscale.
+* crop.
+* speed.
+* dither.
+* bayerScale.
 
 Clip level:
 
 * name.
 * profile.
 * width.
+* height.
 * fps.
 * colors.
 * loop.
+* crop.
+* speed.
+* dither.
+* bayerScale.
 
 Clip-level values MUST override top-level values.
+
+10.4 Transformation fields
+
+The transformation fields introduced in version 0.3.0 MAY appear at the top level, at the clip level, or both. Clip-level values MUST override top-level values, and a clip-level value MUST also override a command-line transformation flag for that clip (FR-024).
+
+Field	Type	Normative definition
+crop	Object with integer keys x, y, width, height, or the string form "x:y:width:height"	FR-025
+width	Integer, 2 to 8192	FR-026
+height	Integer, 2 to 8192	FR-026
+speed	Number, 0.25 to 4.0, at most three fractional digits	FR-027
+dither	One of none, bayer, floyd_steinberg, sierra2, sierra2_4a	FR-028
+bayerScale	Integer, 0 to 5	FR-028
+
+Example:
+
+{
+  "schemaVersion": 1,
+  "input": "./videos/demo.mp4",
+  "profile": "balanced",
+  "width": 800,
+  "dither": "sierra2_4a",
+  "clips": [
+    {
+      "name": "opening",
+      "start": "00:01:00",
+      "end": "00:01:05",
+      "crop": { "x": 320, "y": 180, "width": 1280, "height": 720 }
+    },
+    {
+      "name": "reaction",
+      "start": "00:03:20",
+      "duration": 7,
+      "crop": "0:0:1920:800",
+      "speed": 2.0,
+      "dither": "bayer",
+      "bayerScale": 5
+    }
+  ]
+}
+
+An unknown transformation field MUST be handled by the existing unknown-field rule of section 10.2 and section 11.2, which generates a warning.
+
+The manifest schemaVersion remains 1. Every transformation field is optional and additive, no existing field changes meaning, and a manifest that omits them MUST behave exactly as it did in version 0.2.0. A schemaVersion increment would be required only if an existing field's meaning changed or a new field became mandatory, and neither occurs in version 0.3.0.
 
 ⸻
 
@@ -869,7 +1164,9 @@ Each row MUST supply:
 
 11.2 Optional columns
 
-name,profile,width,fps,colors,loop
+name,profile,width,height,fps,colors,loop,crop,speed,dither,bayerScale
+
+The crop column MUST use the colon-separated string form defined in FR-025. An empty cell means the value is not specified for that row and the next precedence level applies (FR-024).
 
 11.3 Example
 
@@ -877,6 +1174,12 @@ name,start,end,duration,profile
 opening,00:01:00,00:01:05,,balanced
 reaction,00:03:20,,7,high
 ending,00:14:30,00:14:35,,small
+
+Example with transformations:
+
+name,start,end,profile,crop,width,speed,dither
+opening,00:01:00,00:01:05,balanced,320:180:1280:720,800,1.0,sierra2_4a
+reaction,00:03:20,00:03:27,high,,640,2.0,bayer
 
 Empty rows MUST be ignored.
 
@@ -998,6 +1301,57 @@ For inspect on a URL, the engine MUST acquire the source under FR-020 before run
 
 These additions are backward compatible. Existing local invocations MUST behave exactly as in version 0.1.0 (NFR-006).
 
+12.9 Preview frames
+
+Single-frame form:
+
+python scripts/video_to_gif.py preview \
+  --input "./videos/demo.mp4" \
+  --at "00:01:02.500" \
+  --crop 320:180:1280:720 \
+  --width 640 \
+  --json
+
+Manifest form, producing one still per clip at that clip's start timestamp:
+
+python scripts/video_to_gif.py preview \
+  --manifest "./clips.json" \
+  --json
+
+Explicit output naming:
+
+python scripts/video_to_gif.py preview \
+  --input "./videos/demo.mp4" \
+  --at "00:01:02.500" \
+  --output-name "framing-check.png" \
+  --json
+
+The preview command MUST accept --input or --manifest, --at, --output-name, --output-directory, --config, --collision-policy, --allow-outside-project, --allow-upscale, --dry-run, --json, every transformation flag in section 12.10, and the remote source flags of section 12.8.
+
+It MUST also accept --profile, --fps, --colors, and --loop so that a preview can be requested with the same settings as the GIF it previews. The settings that do not apply to a still frame are ignored with a warning under FR-029 rather than rejected.
+
+The behavior of preview is defined normatively in FR-029, and its result shape in section 13.4.
+
+12.10 Transformation flags
+
+The create, batch, and preview commands MUST accept the following additive flags:
+
+Flag	Value format	Normative definition
+--crop <x>:<y>:<w>:<h>	Four unsigned decimal integers separated by colons	FR-025
+--width <pixels>	Integer, 2 to 8192	FR-026
+--height <pixels>	Integer, 2 to 8192	FR-026
+--speed <multiplier>	Decimal, 0.25 to 4.0, at most three fractional digits	FR-027
+--dither <mode>	One of none, bayer, floyd_steinberg, sierra2, sierra2_4a	FR-028
+--bayer-scale <n>	Integer, 0 to 5	FR-028
+
+--width already existed in version 0.1.0 as the maximum output width and its meaning is unchanged; --height is its vertical counterpart. --allow-upscale continues to govern whether resolved dimensions may exceed the effective source dimensions (FR-026).
+
+For batch, a transformation flag applies to every clip that does not define that field at the clip level; a clip-level manifest value takes precedence over the flag (FR-024).
+
+An invalid flag value MUST be rejected during preflight with the error code defined in FR-025 through FR-028 and exit code 6, before any FFmpeg process is started.
+
+These additions are backward compatible. Every version 0.1.0 and version 0.2.0 invocation MUST behave exactly as it did before (NFR-006).
+
 ⸻
 
 13. Structured result contract
@@ -1027,10 +1381,22 @@ Example:
       "startMs": 60000,
       "endMs": 65000,
       "durationMs": 5000,
+      "outputDurationMs": 2500,
       "width": 640,
       "height": 360,
       "fps": 15,
-      "sizeBytes": 2814300
+      "sizeBytes": 2814300,
+      "transformations": {
+        "crop": { "x": 320, "y": 180, "width": 1280, "height": 720 },
+        "sourceWidth": 1920,
+        "sourceHeight": 1080,
+        "effectiveSourceWidth": 1280,
+        "effectiveSourceHeight": 720,
+        "speed": 2.0,
+        "dither": "sierra2_4a",
+        "bayerScale": null,
+        "upscaled": false
+      }
     }
   ],
   "failed": [
@@ -1046,9 +1412,12 @@ Example:
     "requested": 2,
     "created": 1,
     "failed": 1,
-    "skipped": 0
+    "skipped": 0,
+    "previews": 0
   }
 }
+
+The outputDurationMs, transformations, previews, and summary.previews fields are additive and do not change the result schemaVersion (FR-030).
 
 13.2 Status values
 
@@ -1089,6 +1458,67 @@ When a remote source is acquired, download progress MUST use stage "download":
 
 The totalBytes field MAY be null when the source does not declare a size, in which case percent MAY be omitted. Any URL that appears in a progress event MUST be redacted under SEC-015.
 
+Preview extraction MUST emit progress using stage "preview":
+
+{"event":"stage_progress","clipIndex":0,"stage":"preview","percent":100.0}
+
+13.4 Preview result
+
+The preview command MUST return the same document structure with a previews array. Preview entries MUST NOT appear in created, and summary.created MUST NOT count them (FR-029).
+
+Example:
+
+{
+  "schemaVersion": 1,
+  "command": "preview",
+  "status": "success",
+  "source": {
+    "path": "./videos/demo.mp4",
+    "durationMs": 902144,
+    "width": 1920,
+    "height": 1080,
+    "videoStreamIndex": 0
+  },
+  "created": [],
+  "previews": [
+    {
+      "clipIndex": 0,
+      "name": "opening",
+      "path": "./output/product-demo_00-01-02.500.png",
+      "atMs": 62500,
+      "width": 640,
+      "height": 360,
+      "sizeBytes": 214300,
+      "transformations": {
+        "crop": { "x": 320, "y": 180, "width": 1280, "height": 720 },
+        "sourceWidth": 1920,
+        "sourceHeight": 1080,
+        "effectiveSourceWidth": 1280,
+        "effectiveSourceHeight": 720,
+        "speed": 1.0,
+        "dither": null,
+        "bayerScale": null,
+        "upscaled": false
+      }
+    }
+  ],
+  "failed": [],
+  "warnings": [
+    "TRANSFORMATION_NOT_APPLICABLE: speed does not apply to a preview frame and was ignored."
+  ],
+  "summary": {
+    "requested": 1,
+    "created": 0,
+    "failed": 0,
+    "skipped": 0,
+    "previews": 1
+  }
+}
+
+The created array MUST be present and empty for the preview command. The previews array MUST be present and empty for the create and batch commands.
+
+Warnings remain plain strings. A warning defined by version 0.3.0 MUST begin with its stable token followed by ": ", so tests and agents can identify it without parsing prose. The tokens defined in this version are UPSCALE_NOT_ALLOWED and TRANSFORMATION_NOT_APPLICABLE.
+
 ⸻
 
 14. Exit codes
@@ -1119,6 +1549,15 @@ Remote source failures reuse existing exit codes where the semantics fit and add
 * 13: REMOTE_TOO_LARGE, and RESOURCE_LIMIT_EXCEEDED for a free-disk or temporary-disk breach during download.
 * 14: REMOTE_DOWNLOAD_FAILED, covering network errors, HTTP error statuses, truncated downloads, and the download wall-clock timeout.
 
+Transformation failures introduce no new exit codes. They reuse existing codes:
+
+* 2: INVALID_USAGE, for a preview --output-name whose extension is not .png (FR-029).
+* 6: INVALID_CROP, INVALID_DIMENSIONS, INVALID_SPEED, and INVALID_DITHER, all detected during preflight (FR-024 through FR-028). INVALID_TIMESTAMP continues to cover an out-of-range preview --at value.
+* 7: OUTPUT_COLLISION, for a preview output that already exists under the default collision policy.
+* 9: FFMPEG_FAILED, for a failure during preview extraction or during a transformed conversion.
+
+Exit code 6 was chosen for every invalid transformation because a transformation is part of the clip definition and is validated in the same preflight pass as timestamps. No new exit code is required.
+
 Internal stack traces MUST NOT be shown by default. A --debug option MAY expose diagnostic details.
 
 ⸻
@@ -1138,11 +1577,14 @@ For every job:
 7. Parse timestamps.
 8. Validate all clips.
 9. Resolve effective profiles.
-10. Resolve output directory.
-11. Generate output names.
-12. Detect collisions.
-13. Estimate processing work.
-14. Return preflight errors or proceed.
+10. Resolve and validate transformations, including crop bounds against the orientation-normalized source dimensions, dimension bounds, upscale evaluation, speed, and dither (FR-024 through FR-028).
+11. Resolve output directory.
+12. Generate output names.
+13. Detect collisions.
+14. Estimate processing work.
+15. Return preflight errors or proceed.
+
+No FFmpeg process may be started before step 15 completes.
 
 15.2 GIF palette pipeline
 
@@ -1151,15 +1593,29 @@ For every valid clip:
 1. Seek to the requested start position.
 2. Decode only the required duration.
 3. Normalize display orientation.
-4. Convert to the target frame rate.
-5. Scale while preserving aspect ratio.
-6. Generate a representative palette.
-7. Encode the GIF using that palette.
-8. Write to a temporary output file.
-9. Verify that the output is a non-empty GIF.
-10. Atomically move the completed file to its destination.
+4. Apply the validated crop rectangle, when one is supplied (FR-025).
+5. Apply playback-speed retiming, when the effective speed is not 1.0 (FR-027).
+6. Convert to the target frame rate.
+7. Scale while preserving the aspect ratio of the current frame.
+8. Generate a representative palette.
+9. Encode the GIF using that palette and the effective dither mode (FR-028).
+10. Write to a temporary output file.
+11. Verify that the output is a non-empty GIF.
+12. Atomically move the completed file to its destination.
+
+Steps 4 through 7 define the transformation order and MUST hold:
+
+* Cropping MUST precede scaling, so that scaling, aspect-ratio preservation, the profile maximum width, and the no-upscale rule of FR-014 all apply to the cropped rectangle rather than the original frame.
+* Speed retiming MUST precede frame-rate conversion, so that the requested output frame rate describes the finished GIF rather than the pre-retimed stream.
+* Frame-rate conversion MUST precede palette generation, unchanged from version 0.1.0.
+
+Steps 4 through 7 MUST be constructed from validated values only and MUST be identical in the palette-generation pass and the encoding pass, so the palette is derived from exactly the frames that are encoded (SEC-018).
+
+Cropping is purely spatial while speed retiming and frame-rate conversion are purely temporal. An implementation MAY therefore reorder step 4 relative to steps 5 and 6 for efficiency, provided the result remains functionally equivalent under NFR-002. Steps 4 and 7 MUST NOT be reordered relative to each other, and steps 5 and 6 MUST NOT be reordered relative to each other.
 
 FFmpeg provides palettegen to generate a representative palette and paletteuse to apply that palette during GIF encoding. (FFmpeg)
+
+Preview extraction (FR-029) uses steps 1 through 4 and 7, skips steps 5, 6, 8, and 9, and encodes a single full-colour PNG frame. Steps 10 through 12 then apply unchanged, except that step 11 verifies a non-empty PNG rather than a non-empty GIF.
 
 15.3 Temporary output
 
@@ -1180,13 +1636,32 @@ The generated clip SHOULD satisfy:
 * No audio stream.
 * Deterministic output dimensions for the same input and settings.
 
+For a transformed clip, the following additional expectations apply:
+
+* The applied crop rectangle MUST equal the requested rectangle exactly (FR-025).
+* Output dimensions MUST be deterministic for the same source, crop, profile, and dimension bounds.
+* For a speed-adjusted clip, output duration accuracy SHOULD be within one output frame or 100 milliseconds of clipDurationMs / speed, whichever is greater. The tolerance is evaluated against the speed-adjusted target, not against the source range duration.
+* Start-position accuracy is unaffected by speed, because retiming does not change the selected source range (FR-027).
+* NFR-002 applies unchanged: the same source, range, profile, configuration, and transformation values MUST produce functionally equivalent output.
+
 15.5 Dithering
 
-The balanced and high profiles SHOULD use FFmpeg’s default palette-use dithering unless testing identifies a better deterministic setting.
+Version 0.3.0 makes the palette-use dither mode a public option (FR-028). Profile defaults MUST be:
 
-The small profile MAY use a more compression-oriented dithering mode.
+Profile	Default dither mode	Default bayerScale
+small	bayer	5
+balanced	sierra2_4a	Not applicable
+high	sierra2_4a	Not applicable
+custom	sierra2_4a	Not applicable
 
-Dithering details MUST remain configurable internally without changing the public manifest schema in patch releases.
+These defaults reproduce the version 0.1.0 and 0.2.0 behavior, so a job that does not specify a dither value MUST produce functionally equivalent output to earlier versions (NFR-002, NFR-006). The exact values remain subject to the profile benchmarking of open decision 5 in section 26.
+
+Because the dither mode is now public, the version 0.1.0 allowance to change dithering internally is superseded by the following compatibility rules:
+
+* An explicitly requested dither mode and bayerScale MUST be honored exactly and MUST NOT change across patch releases.
+* A profile's default dither mode or default bayerScale MAY change in a minor release with a changelog entry, and MUST NOT change in a patch release.
+* Adding a value to the dither enumeration is an additive minor-release change. Removing a value or changing the meaning of an existing value is a breaking change under section 24.
+* The dither and bayerScale manifest and configuration fields are additive optional fields and do not change schemaVersion 1 (NFR-006).
 
 ⸻
 
@@ -1385,6 +1860,23 @@ The engine MUST NOT bypass, disable, or circumvent DRM, encryption, authenticati
 
 A source detected as DRM-protected or otherwise access-controlled MUST be rejected with error code DRM_PROTECTED and exit code 5. The optional yt-dlp adapter MUST NOT be used to circumvent access controls.
 
+SEC-018: Transformation parameter validation
+
+Transformation values become arguments inside an FFmpeg filter graph and MUST therefore be treated as an injection surface, even though SEC-001 already prohibits shell execution. SEC-001 remains in force unchanged: subprocess arguments are always passed as arrays and shell=True is never used.
+
+The engine MUST:
+
+* Accept only integers, bounded decimals, and members of the fixed enumerations defined in FR-025 through FR-028. Free text, filter strings, filter-graph fragments, filter scripts, FFmpeg expressions, and option key-value pairs MUST NOT be accepted as transformation input from the command line, a manifest, or configuration.
+* Validate and range-check every transformation parameter before any filter graph is constructed, and construct the filter graph exclusively from values that the engine re-serializes from its own validated numeric and enum types. The user-supplied text MUST NOT be concatenated into a filter graph.
+* Reject any value whose text contains a character outside the grammar for its type. For every transformation parameter this excludes at least whitespace, newline, and the characters , ; ' " \ [ ] = % ( ) $ ` and *. The colon is permitted only as the field separator inside a --crop value, which MUST contain exactly three colons and four unsigned integer fields.
+* Apply the identical validated filter chain to the palette-generation pass and the encoding pass (section 15.2), so palette generation cannot be driven by a different or unvalidated parameter set.
+* Continue to enforce the protocol whitelist of SEC-010 on every FFmpeg and ffprobe invocation, including preview extraction, so no filter may reference a remote resource.
+* Never accept a user-supplied filter script file or an inline filter definition through any flag, manifest field, or configuration key (SEC-008, SEC-009).
+
+Numeric bounds are part of the security contract, not only the usability contract: an unbounded dimension, crop offset, or speed value is a resource-exhaustion vector under SEC-011.
+
+Security tests MUST verify that transformation values containing filter-graph metacharacters, for example a crop value of "0:0:100:100,drawtext=text=x" or a dither value of "none[a];[a]movie=/etc/passwd", are rejected during preflight, cause no FFmpeg process to start, and cannot add, remove, or reorder a filter.
+
 ⸻
 
 18. Privacy requirements
@@ -1442,6 +1934,9 @@ Typical questions:
 * Is writing to the external destination approved?
 * Should network access be enabled to download a remote source?
 * Does the user have a lawful basis to use the remote video?
+* Which region of the frame should be kept when the user asks for a crop without giving a rectangle?
+
+The agent SHOULD offer a preview frame (FR-029) when a requested crop or resize is ambiguous, rather than guessing a rectangle and producing a GIF. The agent MUST NOT invent a crop rectangle that the user did not specify or confirm.
 
 19.3 Questions the agent should not repeat
 
@@ -1472,6 +1967,8 @@ The skill MUST ask when ambiguity could change:
 * Output destination.
 * Overwrite behavior.
 * Quality profile.
+* The crop rectangle or the output dimensions.
+* The playback-speed multiplier.
 
 The skill SHOULD make deterministic assumptions for harmless details such as default looping and temporary-file cleanup.
 
@@ -1555,6 +2052,7 @@ The repository MUST provide:
 * Usage examples.
 * JSON and CSV examples.
 * Quality-profile documentation.
+* Transformation documentation, provided as references/transformations.md, covering the crop parameter model and coordinate space, the width and height bounds and their interaction with quality profiles and upscaling, the speed multiplier and its effect on output duration and frame count, the dither enumeration with size and quality guidance, the preview command, and the per-clip manifest fields.
 * Troubleshooting instructions.
 * Security behavior.
 * Platform-specific notes.
@@ -1715,6 +2213,7 @@ Security tests MUST verify:
 * Resource limits terminate runaway conversions and clean up temporary files.
 * A signed URL is redacted from all logs, progress events, and structured results.
 * A private-network or loopback URL is blocked without explicit approval.
+* Transformation parameters cannot inject filter-graph syntax (SEC-018).
 
 22.5 Fuzz and property tests
 
@@ -1743,6 +2242,45 @@ Remote source tests MUST verify:
 * yt-dlp adapter: guarded by adapter availability; when yt-dlp is absent, requesting the adapter produces YTDLP_MISSING and exit code 3.
 
 Generative tests for URL parsing MUST produce structured validation errors for malformed URLs, never uncaught exceptions.
+
+22.7 Transformation tests
+
+Unit tests MUST cover:
+
+* Crop parsing in all three accepted forms: the CLI and CSV string form, the JSON object form, and rejection of a malformed string form.
+* Crop rejection for negative, zero, non-integer, out-of-range, and out-of-bounds rectangles, each producing INVALID_CROP and exit code 6.
+* Crop bounds evaluated against orientation-normalized dimensions for a rotated source.
+* Dimension bound parsing and rejection outside 2 through 8192, producing INVALID_DIMENSIONS.
+* Dimension resolution when only width is given, only height is given, and both are given, verifying that the both-given case fits inside the box and preserves the aspect ratio.
+* Explicit dimensions overriding a profile maximum width in both directions.
+* Upscale gating: without allowUpscale the output is clamped to the effective source dimensions and the UPSCALE_NOT_ALLOWED warning is emitted; with allowUpscale the requested dimensions are honored.
+* Dimension parity: an explicitly supplied odd bound is honored exactly, an automatically derived dimension remains even, and the profile-only path produces the same dimensions as version 0.2.0.
+* Speed parsing and rejection for 0, negative values, values below 0.25, values above 4.0, non-numeric values, exponent notation, and more than three fractional digits, each producing INVALID_SPEED.
+* Speed duration arithmetic: outputDurationMs equals round(durationMs / speed) for representative multipliers.
+* Dither enum validation, including rejection of an unknown mode, of a bayerScale outside 0 through 5, and of a bayerScale supplied with a non-bayer mode, each producing INVALID_DITHER.
+* Dither and bayerScale default resolution per profile (section 15.5).
+* Transformation precedence: clip-level manifest value over CLI flag over top-level manifest value over configuration over built-in default (FR-024).
+* Rejection of a crop key in project configuration (section 9.6).
+* Preview output naming, extension handling, and the INVALID_USAGE rejection of a non-PNG --output-name.
+* Result serialization of the transformations object, outputDurationMs, previews, and summary.previews.
+
+Integration tests MUST verify, against synthetic media:
+
+* A cropped GIF has the expected output dimensions, confirming that crop was applied before scale.
+* A crop combined with a profile maximum width produces dimensions derived from the cropped rectangle, not the original frame.
+* A speed-adjusted GIF has an output duration within the section 15.4 tolerance of the speed-adjusted target.
+* Each dither mode produces a valid GIF, and the same settings produce functionally equivalent output on repeated runs (NFR-002).
+* A preview invocation produces exactly one PNG, produces no GIF, and reports created as empty with summary.previews equal to 1.
+* A manifest with per-clip crop, width, speed, and dither values produces per-clip output dimensions and durations matching each clip's settings.
+* A default invocation with no transformation flags produces output functionally equivalent to version 0.2.0 for the same inputs.
+
+Security tests MUST verify:
+
+* Transformation values containing filter-graph metacharacters are rejected in preflight, start no FFmpeg process, and cannot add, remove, or reorder a filter (SEC-018).
+* A preview output cannot escape the output directory and does not overwrite an existing file under the default collision policy.
+* The palette-generation and encoding passes receive the identical validated filter chain.
+
+Generative tests for crop, dimension, speed, and dither parsing MUST use fixed seeds and MUST produce structured validation errors, never uncaught exceptions (section 22.5).
 
 ⸻
 
@@ -1879,6 +2417,62 @@ AC-0.2.14: Backward compatibility
 
 All version 0.1.0 command-line invocations, configuration, and local behavior are unchanged.
 
+Version 0.3.0 acceptance criteria
+
+Version 0.3.0 additionally requires the following.
+
+AC-0.3.1: Crop applied
+
+Given a 1920x1080 source and --crop 320:180:1280:720 with a profile whose maximum width is 640, the output GIF is 640x360, confirming that cropping occurred before scaling and that the aspect ratio of the cropped rectangle was preserved.
+
+AC-0.3.2: Crop bounds rejected
+
+A crop rectangle that is negative, zero-sized, non-integer, or extends beyond the orientation-normalized source dimensions is rejected during preflight with INVALID_CROP and exit code 6, and no GIF is produced.
+
+AC-0.3.3: Explicit resize overrides the profile
+
+With profile small, whose maximum width is 480, an explicit --width 800 on a source at least 800 pixels wide produces an 800-pixel-wide GIF.
+
+AC-0.3.4: Upscale gating
+
+For a 640-pixel-wide source, --width 1280 without --allow-upscale produces a 640-pixel-wide GIF and an UPSCALE_NOT_ALLOWED warning; the same request with --allow-upscale produces a 1280-pixel-wide GIF.
+
+AC-0.3.5: Dimension box
+
+With both --width 800 and --height 200 on a 16:9 source, the output fits inside the box, preserves the aspect ratio, and is not distorted.
+
+AC-0.3.6: Speed duration
+
+A four-second range at --speed 2.0 produces a GIF of approximately two seconds, and the same range at --speed 0.5 produces a GIF of approximately eight seconds, each within the section 15.4 tolerance. Both durationMs and outputDurationMs are reported.
+
+AC-0.3.7: Speed bounds
+
+Speed values of 0, a negative number, 0.1, and 5.0 are each rejected with INVALID_SPEED and exit code 6 before any conversion starts.
+
+AC-0.3.8: Dither enumeration
+
+Each of none, bayer, floyd_steinberg, sierra2, and sierra2_4a produces a valid GIF, and an unrecognized dither value is rejected with INVALID_DITHER and exit code 6 with a message listing the permitted values.
+
+AC-0.3.9: Preview frame
+
+A preview invocation writes exactly one PNG to the output directory, produces no GIF, applies the requested crop and resize, and returns a result where created is empty, previews contains one entry, and summary.created is 0.
+
+AC-0.3.10: Per-clip transformations
+
+A manifest whose clips specify different crop, width, speed, and dither values produces one GIF per clip whose reported dimensions, output duration, and dither match that clip's settings, and a clip-level value overrides both the top-level manifest value and the equivalent command-line flag.
+
+AC-0.3.11: No filter injection
+
+Transformation values containing filter-graph metacharacters are rejected during preflight, no FFmpeg process is started, and the filter graph cannot be altered.
+
+AC-0.3.12: Transformation reporting
+
+Every created entry reports the applied crop rectangle, effective source and output dimensions, speed, dither mode, bayerScale, upscaled, and outputDurationMs, and the agent's summary reflects them without re-deriving them.
+
+AC-0.3.13: Backward compatibility
+
+All version 0.1.0 and version 0.2.0 command-line invocations, configuration files, and manifests behave unchanged, and a job with no transformation settings produces output functionally equivalent to version 0.2.0. Configuration, manifest, and structured result schemaVersion remain 1.
+
 ⸻
 
 24. Versioning policy
@@ -1906,7 +2500,9 @@ Version	Status	Description
 0.1.0-draft.2	Ratified	Ratified and shipped as product 0.1.0. Adds FFmpeg network isolation (SEC-010), resource limits (SEC-011), exit code 13, --output-name flag, duration and loop syntax rules, marketplace metadata (21.5), fuzz tests (22.5), mandatory CI matrix, named validation tooling
 0.1.0-rc.1	Not issued	Release-candidate stage folded into the product 0.1.0 release; the specification shipped directly from 0.1.0-draft.2
 0.1.0	Released	Product 0.1.0 released from specification 0.1.0-draft.2
-0.2.0-draft.1	Current	Adds remote source acquisition: FR-018 through FR-023, SEC-012 through SEC-017, exit code 14, remoteSources and keepRemoteSource configuration, limits.maxDownloadBytes and limits.maxDownloadSeconds, --allow-remote / --keep-remote-source / --remote-adapter flags, download progress events, rights-confirmation interaction (19.6), remote testing (22.6) and version 0.2.0 acceptance criteria (section 23)
+0.2.0-draft.1	Ratified	Ratified and shipped as product 0.2.0. Adds remote source acquisition: FR-018 through FR-023, SEC-012 through SEC-017, exit code 14, remoteSources and keepRemoteSource configuration, limits.maxDownloadBytes and limits.maxDownloadSeconds, --allow-remote / --keep-remote-source / --remote-adapter flags, download progress events, rights-confirmation interaction (19.6), remote testing (22.6) and version 0.2.0 acceptance criteria (section 23)
+0.2.0	Released	Product 0.2.0 released from specification 0.2.0-draft.1
+0.3.0-draft.1	Current	Adds transformations without text: FR-024 through FR-030, SEC-018, crop / width / height / speed / dither / bayerScale across CLI, manifests, and configuration, the preview command and PNG preview results, transformation ordering in the palette pipeline (15.2), public dither enumeration and profile defaults (15.5), transformation reporting fields, transformation testing (22.7) and version 0.3.0 acceptance criteria (section 23). Introduces no new exit code and no schemaVersion change. Defers captions and subtitle burn-in to version 0.4.0 and renumbers the roadmap accordingly
 
 ⸻
 
@@ -1942,20 +2538,36 @@ Capabilities:
 
 Remote acquisition is disabled by default. Authenticated provider integrations remain out of scope and separate from general URL support (section 3.3).
 
-25.3 Version 0.3.0 — Transformations
+25.3 Version 0.3.0 — Transformations without text
+
+Version 0.3.0 is specified normatively by FR-024 through FR-030, SEC-018, sections 9.6, 10.4, 12.9, 12.10, 13.4, the transformation ordering in section 15.2, the accuracy rules in section 15.4, the dithering rules in section 15.5, section 22.7, and the version 0.3.0 acceptance criteria in section 23.
+
+Capabilities:
+
+* Cropping in orientation-normalized source pixels, applied before scaling (FR-025).
+* Explicit resizing with width and height bounds that override profile maximums, with upscaling still gated by allowUpscale (FR-026).
+* Playback-speed adjustment from 0.25x to 4.0x by timestamp retiming (FR-027).
+* Custom dithering from a fixed enumeration, with documented profile defaults (FR-028).
+* PNG preview frames through the preview command, which never produce a GIF (FR-029).
+* Per-clip transformation settings in JSON and CSV manifests, with clip-level override (section 10.4).
+* Transformation reporting in the structured result (FR-030).
+
+Every transformation parameter is numeric or a member of a fixed enumeration, so no user-supplied text reaches an FFmpeg filter graph (SEC-018). Text captions and subtitle burn-in are deliberately excluded and move to version 0.4.0 for the reasons recorded in section 3.3.
+
+Configuration, manifest, and structured result schema versions remain 1, and no new exit code is introduced.
+
+25.4 Version 0.4.0 — Captions and subtitle burn-in
 
 Planned capabilities:
 
-* Cropping.
-* Explicit resizing.
-* Speed adjustment.
-* Text captions.
-* Subtitle burn-in.
-* Custom dithering.
-* Preview frames.
-* Per-clip transformation settings.
+* Text captions with position, size, and colour control.
+* Subtitle burn-in from external SRT, ASS or SSA, and WebVTT files.
+* Burn-in from embedded subtitle streams.
+* Cross-platform font resolution with an explicit fallback policy.
 
-25.4 Version 0.4.0 — Size optimization
+Version 0.4.0 requires its own specification pass before implementation, including a dedicated security review of FFmpeg filter-argument escaping for free text, a decision on font discovery and any bundled-font licensing on macOS, Windows, and Linux, and a threat model for each supported subtitle parser. The version 0.3.0 rule that no user-supplied text reaches a filter graph (SEC-018) MUST be replaced by an explicit, reviewed escaping requirement rather than silently relaxed.
+
+25.5 Version 0.5.0 — Size optimization
 
 Planned capabilities:
 
@@ -1964,7 +2576,7 @@ Planned capabilities:
 * Optimization reports.
 * User-defined quality floors.
 
-25.5 Version 1.0.0 — Stable public distribution
+25.6 Version 1.0.0 — Stable public distribution
 
 Includes:
 
@@ -1977,7 +2589,7 @@ Includes:
 * Upgrade documentation.
 * Public contribution guidelines.
 
-25.6 Version 2.0.0 — AI-assisted clip discovery
+25.7 Version 2.0.0 — AI-assisted clip discovery
 
 Potential capabilities:
 
@@ -2012,7 +2624,9 @@ Still open before release candidate status:
 8. Maximum safe generated filename length.
 9. Progress-event stability guarantees.
 10. Whether package artifacts should be generated in CI or committed.
-12. Whether file-size estimation belongs in version 0.1.0 or 0.4.0.
+12. Whether file-size estimation belongs in version 0.1.0 or the size-optimization release, now version 0.5.0.
+13. Whether preview frames should support an output format other than PNG, and whether a multi-frame contact sheet is worth a later release. Version 0.3.0 specifies PNG only (FR-029).
+14. Whether the transformation defaults of section 9.6 also belong in a global user configuration, which depends on open decision 4.
 
 The remaining decisions do not block release-candidate preparation.
 
