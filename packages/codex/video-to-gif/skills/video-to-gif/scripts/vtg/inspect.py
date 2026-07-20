@@ -122,6 +122,12 @@ def run_ffprobe(ffprobe: str, source: str, *, timeout: float = 60.0) -> dict[str
             capture_output=True,
             timeout=timeout,
             text=True,
+            # ffprobe emits UTF-8 JSON (stream tags, the echoed source path) and
+            # UTF-8 diagnostics regardless of the host locale. Decoding them with
+            # the locale default would mangle or fail on a non-ASCII filename
+            # under a Windows console codepage (spec section 13.5, 6.1).
+            encoding="utf-8",
+            errors="replace",
             check=False,
         )
     except subprocess.TimeoutExpired as exc:

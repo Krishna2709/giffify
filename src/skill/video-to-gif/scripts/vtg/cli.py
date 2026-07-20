@@ -284,9 +284,45 @@ def build_parser() -> argparse.ArgumentParser:
 # ---------------------------------------------------------------------------
 
 
+def configure_output_encoding() -> None:
+    """Force UTF-8 on stdout/stderr before anything is written (spec section 13.5).
+
+    ``sys.stdout``/``sys.stderr`` default to the host locale encoding, which on
+    Windows is the console codepage (cp1252/cp437 on the CI runners). Writing any
+    character outside that codepage -- a Unicode digit echoed back in a validation
+    error, a CJK/Cyrillic/emoji source filename, a non-ASCII clip name from a
+    manifest -- then raises ``UnicodeEncodeError`` inside the writer. That escapes
+    the engine's error contract entirely: the process dies with exit code 1, which
+    section 14 deliberately does not define, and stdout carries no structured
+    result at all, leaving the agent layer blind.
+
+    Pinning both streams to UTF-8 makes the encoding independent of the host
+    locale on every supported platform (section 6.1). ``errors="backslashreplace"``
+    guarantees the call can never itself raise: a path that survived
+    ``os.fsdecode`` on POSIX may contain lone surrogates, which even UTF-8 cannot
+    encode strictly.
+
+    Streams replaced by in-process test doubles (``io.StringIO``) have no
+    ``reconfigure``; they are already text-native and need no adjustment, so the
+    missing attribute is not an error.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (AttributeError, OSError, ValueError):  # pragma: no cover - detached stream
+            continue
+
+
 def _emit(result: dict[str, Any], json_mode: bool) -> None:
     if json_mode:
-        sys.stdout.write(json.dumps(result, ensure_ascii=False) + "\n")
+        # ensure_ascii=True (spec section 13.5): the contract document is pure
+        # ASCII, so it survives any downstream consumer, pipe or redirection
+        # whatever their encoding. Non-ASCII becomes \uXXXX escapes, which
+        # json.loads restores to the identical string.
+        sys.stdout.write(json.dumps(result, ensure_ascii=True) + "\n")
         sys.stdout.flush()
     else:
         _emit_human(result)
@@ -1681,6 +1717,10 @@ def _cancelled_result(
 
 
 def main(argv: list[str] | None = None) -> int:
+    # First statement in the engine: every later write to stdout/stderr -- the
+    # final JSON document, the JSON Lines progress stream, argparse usage errors,
+    # human-readable output -- depends on this (spec section 13.5).
+    configure_output_encoding()
     parser = build_parser()
     args = parser.parse_args(normalize_argv(list(sys.argv[1:] if argv is None else argv)))
     _install_signal_handlers()

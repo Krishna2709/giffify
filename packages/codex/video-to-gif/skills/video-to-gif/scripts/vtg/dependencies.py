@@ -42,6 +42,10 @@ def _run(cmd: list[str], timeout: float = 15.0) -> subprocess.CompletedProcess[s
         capture_output=True,
         timeout=timeout,
         text=True,
+        # Probe output (version banners, filter/encoder tables) is UTF-8; decode
+        # it independently of the host locale and never raise (section 13.5).
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
 

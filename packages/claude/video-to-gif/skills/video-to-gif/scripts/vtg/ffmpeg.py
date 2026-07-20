@@ -276,6 +276,11 @@ def _popen_kwargs() -> dict[str, Any]:
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.PIPE,
         "text": True,
+        # FFmpeg writes UTF-8 diagnostics that quote the input path verbatim, so
+        # a CJK/Cyrillic/emoji filename would fail to decode under the locale
+        # default on Windows. Decode as UTF-8 and never raise (section 13.5).
+        "encoding": "utf-8",
+        "errors": "replace",
     }
     if os.name == "posix":
         kwargs["start_new_session"] = True  # own process group for group signals

@@ -8,7 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+### Fixed
+
+- **Output encoding is no longer locale-dependent** (spec §13.5, §6.1). The final
+  JSON document and the JSON Lines progress stream were written to streams whose
+  encoding defaulted to the host locale — the console codepage on Windows
+  (cp1252/cp437). Any character outside that codepage in the result raised
+  `UnicodeEncodeError` inside the writer *after* the outcome had been decided, so
+  the process exited with code 1 — which §14 deliberately leaves undefined — and
+  standard output carried no structured result at all. A source filename in CJK,
+  Cyrillic, or emoji was enough to trigger it on a fully successful conversion,
+  leaving the agent layer blind. Both streams are now pinned to UTF-8 at engine
+  entry, and the final document is escaped to pure ASCII so it survives any
+  consumer, pipe, or redirection. Escaping is lossless: parsing returns the
+  original string.
+- **Subprocess output is decoded as UTF-8** rather than with the locale default,
+  so a non-ASCII path quoted back by ffprobe, FFmpeg, or yt-dlp cannot fail to
+  decode (spec §13.5).
 
 ## [0.3.0] - 2026-07-12
 

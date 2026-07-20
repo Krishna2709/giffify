@@ -1522,6 +1522,18 @@ The created array MUST be present and empty for the preview command. The preview
 
 Warnings remain plain strings. A warning defined by version 0.3.0 MUST begin with its stable token followed by ": ", so tests and agents can identify it without parsing prose. The tokens defined in this version are UPSCALE_NOT_ALLOWED and TRANSFORMATION_NOT_APPLICABLE.
 
+13.5 Output encoding
+
+The structured result is a contract, so its delivery MUST NOT depend on the environment the engine happens to run in. This requirement applies on every operating system named in section 6.1.
+
+The engine MUST write both the final JSON document on standard output and the progress JSON Lines stream on standard error as UTF-8, regardless of the host locale, the LANG or LC_ALL environment, or the active console codepage. The engine MUST NOT rely on the interpreter's default stream encoding, which on Windows is the console codepage rather than UTF-8.
+
+A locale-dependent encoding failure MUST NOT replace the structured result. User-controlled text reaches the result document through several channels that are outside any codepage: a source path or filename containing non-Latin characters, a clip name from a manifest, an echoed invalid parameter value, or a diagnostic message from FFmpeg. Failing to encode any of them MUST NOT cause the process to terminate outside the exit codes defined in section 14, and MUST NOT cause standard output to carry no result at all.
+
+The final JSON document MUST be ASCII-safe: characters outside US-ASCII MUST be escaped using JSON \uXXXX escapes rather than emitted literally. Escaping is lossless, so a consumer that parses the document recovers the original string exactly. This guarantees the document survives any consumer, pipe, or redirection whatever encoding it applies. Progress lines SHOULD be ASCII-safe on the same grounds.
+
+Text the engine reads MUST be decoded with an explicit encoding for the same reason. Configuration files (section 9) and manifests (sections 10 and 11) MUST be read as UTF-8, and output captured from ffprobe, FFmpeg, or a remote acquisition helper MUST be decoded as UTF-8 rather than with the locale default, so a non-ASCII path quoted back by one of those tools cannot fail to decode.
+
 ⸻
 
 14. Exit codes
@@ -2201,6 +2213,8 @@ Continuous integration MUST include:
 * Python 3.10.
 * A newer stable Python version.
 
+The suites MUST include a locale-forced encoding test that runs the engine with a non-UTF-8 encoding imposed on its standard streams, for example by setting PYTHONIOENCODING to a Windows console codepage such as cp1252 or cp437. The test MUST prove that a result containing non-ASCII text is still emitted as a single parseable JSON document on standard output with the exit code defined in section 14, and that the escaped text parses back to the original string (section 13.5). Because the requirement is enforced by the engine rather than by the host, this test MUST run on every platform in the matrix and MUST NOT be skipped on non-Windows runners.
+
 22.4 Security tests
 
 Security tests MUST verify:
@@ -2217,6 +2231,7 @@ Security tests MUST verify:
 * A signed URL is redacted from all logs, progress events, and structured results.
 * A private-network or loopback URL is blocked without explicit approval.
 * Transformation parameters cannot inject filter-graph syntax (SEC-018).
+* A non-UTF-8 stream encoding cannot suppress the structured result or produce an undefined exit code (section 13.5).
 
 22.5 Fuzz and property tests
 

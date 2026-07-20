@@ -2,6 +2,11 @@
 
 Progress events MUST NOT corrupt the final JSON document on stdout, so they are
 always written to stderr, one JSON object per line.
+
+Every line is ASCII-escaped and the stream itself is pinned to UTF-8 by
+:func:`vtg.cli.configure_output_encoding` (spec section 13.5), so a non-ASCII
+clip name or path can never raise an encoding error under a non-UTF-8 host
+locale such as a Windows console codepage.
 """
 
 from __future__ import annotations
@@ -22,9 +27,15 @@ class ProgressReporter:
         payload: dict[str, Any] = {"event": event}
         payload.update(fields)
         try:
-            self._stream.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            # ensure_ascii=True (spec section 13.5): progress lines carry
+            # user-controlled text (clip names, output paths, FFmpeg messages),
+            # so they are escaped to pure ASCII rather than trusted to encode
+            # under the host locale. UnicodeEncodeError is caught alongside the
+            # closed-stream cases as a last resort -- a progress event MUST NEVER
+            # be able to take down a run that is otherwise succeeding.
+            self._stream.write(json.dumps(payload, ensure_ascii=True) + "\n")
             self._stream.flush()
-        except (OSError, ValueError):  # pragma: no cover - stderr closed
+        except (OSError, ValueError):  # pragma: no cover - stderr closed/unencodable
             pass
 
     def clip_started(self, clip_index: int, total_clips: int, name: str | None = None) -> None:
