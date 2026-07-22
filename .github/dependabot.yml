@@ -14,3 +14,14 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    # github/codeql-action/init and github/codeql-action/analyze are separate
+    # action paths in the same repository, but CodeQL requires both to run the
+    # SAME version: analyze reads the configuration init wrote, and a mismatch
+    # fails the run with "Loaded a configuration file for version X, but
+    # running version Y". Ungrouped, Dependabot opens one PR per path, each
+    # bumping only half the pair, so both PRs fail by construction. Grouping
+    # them means a single PR bumps init and analyze together.
+    groups:
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
