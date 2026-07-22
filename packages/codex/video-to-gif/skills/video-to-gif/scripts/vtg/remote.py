@@ -688,6 +688,10 @@ def _acquire_via_ytdlp(
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
+            # yt-dlp reports UTF-8 titles and messages; decode independently of
+            # the host locale and never raise on them (section 13.5).
+            encoding="utf-8",
+            errors="replace",
             timeout=max_seconds,
             check=False,
         )

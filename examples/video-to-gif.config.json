@@ -9,6 +9,13 @@
   "allowOutsideProject": false,
   "remoteSources": "disabled",
   "keepRemoteSource": false,
+  "transformations": {
+    "width": null,
+    "height": null,
+    "speed": 1.0,
+    "dither": null,
+    "bayerScale": null
+  },
   "limits": {
     "maxClipProcessingSeconds": 600,
     "maxTemporaryBytes": 2147483648,

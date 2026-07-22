@@ -42,6 +42,10 @@ def _run(cmd: list[str], timeout: float = 15.0) -> subprocess.CompletedProcess[s
         capture_output=True,
         timeout=timeout,
         text=True,
+        # Probe output (version banners, filter/encoder tables) is UTF-8; decode
+        # it independently of the host locale and never raise (section 13.5).
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
 
@@ -58,16 +62,20 @@ def _has_filter(ffmpeg: str, filter_name: str) -> bool:
     return filter_name in proc.stdout
 
 
-def _has_gif_encoder(ffmpeg: str) -> bool:
+def _has_encoder(ffmpeg: str, encoder: str) -> bool:
     try:
         proc = _run([ffmpeg, "-hide_banner", "-encoders"])
     except (OSError, subprocess.SubprocessError):
         return False
     for line in proc.stdout.splitlines():
         parts = line.split()
-        if len(parts) >= 2 and parts[1] == "gif":
+        if len(parts) >= 2 and parts[1] == encoder:
             return True
     return False
+
+
+def _has_gif_encoder(ffmpeg: str) -> bool:
+    return _has_encoder(ffmpeg, "gif")
 
 
 def find_ytdlp() -> str | None:
@@ -149,8 +157,14 @@ def run_doctor(output_directory: str | None = None) -> dict[str, Any]:
         palettegen = _has_filter(ffmpeg, "palettegen")
         paletteuse = _has_filter(ffmpeg, "paletteuse")
         gif_enc = _has_gif_encoder(ffmpeg)
+        # v0.3.0 (spec section 6.3): cropping needs `crop`, speed retiming needs
+        # `setpts`, and preview frames need PNG encoding (FR-025, FR-027, FR-029).
+        crop_filter = _has_filter(ffmpeg, "crop")
+        setpts_filter = _has_filter(ffmpeg, "setpts")
+        png_enc = _has_encoder(ffmpeg, "png")
     else:
         palettegen = paletteuse = gif_enc = False
+        crop_filter = setpts_filter = png_enc = False
 
     checks.append(
         {
@@ -180,6 +194,19 @@ def run_doctor(output_directory: str | None = None) -> dict[str, Any]:
             "remediation": None if gif_enc else "Install an FFmpeg build with GIF encoding.",
         }
     )
+    for name, ok, what in (
+        ("crop_filter", crop_filter, "the crop filter"),
+        ("setpts_filter", setpts_filter, "the setpts filter"),
+        ("png_encoder", png_enc, "PNG encoding"),
+    ):
+        checks.append(
+            {
+                "name": name,
+                "ok": ok,
+                "detail": "available" if ok else "missing",
+                "remediation": None if ok else f"Install an FFmpeg build with {what}.",
+            }
+        )
 
     temp_ok = _tempdir_writable()
     checks.append(

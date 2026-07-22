@@ -24,6 +24,13 @@ The file is optional. On first use (no file present), the agent asks for a quali
   "allowOutsideProject": false,
   "remoteSources": "disabled",
   "keepRemoteSource": false,
+  "transformations": {
+    "width": null,
+    "height": null,
+    "speed": 1.0,
+    "dither": null,
+    "bayerScale": null
+  },
   "limits": {
     "maxClipProcessingSeconds": 600,
     "maxTemporaryBytes": 2147483648,
@@ -47,7 +54,26 @@ The file is optional. On first use (no file present), the agent asks for a quali
 | `allowOutsideProject` | boolean | `false` | Must be true (plus explicit approval) before the engine writes outside the project root. |
 | `remoteSources` | string | `disabled` | Remote acquisition policy: `disabled`, `ask`, or `enabled`. See below and `references/remote-sources.md`. |
 | `keepRemoteSource` | boolean | `false` | When true, a downloaded remote source is retained after the job and its path is reported in the result. Equivalent to `--keep-remote-source`. |
+| `transformations` | object | see below | Global transformation defaults (v0.3.0). A crop rectangle is **not** permitted here. |
 | `limits` | object | see below | Resource-safety and download limits. |
+
+### `transformations` object (spec section 9.6)
+
+Project-wide transformation defaults. Every field is optional; a configuration that omits the object behaves as though the documented defaults were supplied.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `width` | integer or `null` | `null` | Maximum output width in pixels, 2 to 8192. `null` means the effective quality profile's maximum width applies. Invalid values fail with `INVALID_DIMENSIONS` (exit 6). |
+| `height` | integer or `null` | `null` | Maximum output height in pixels, 2 to 8192. `null` means unbounded (height follows the aspect ratio). Invalid values fail with `INVALID_DIMENSIONS` (exit 6). |
+| `speed` | number | `1.0` | Playback speed multiplier, 0.25 to 4.0, at most three fractional digits. Invalid values fail with `INVALID_SPEED` (exit 6). |
+| `dither` | string or `null` | `null` | One of `none`, `bayer`, `floyd_steinberg`, `sierra2`, `sierra2_4a`. `null` means the effective profile's default mode. Invalid values fail with `INVALID_DITHER` (exit 6). |
+| `bayerScale` | integer or `null` | `null` | Bayer matrix scale, 0 to 5; meaningful only when the effective dither mode is `bayer`. Invalid values fail with `INVALID_DITHER` (exit 6). |
+
+**`crop` is forbidden in configuration.** A crop rectangle is only meaningful against one specific source's dimensions, so `transformations.crop` is rejected by `validate-config` as a validation error with the field path `transformations.crop` (exit 2). Supply a crop per request with `--crop`, or per clip in a manifest.
+
+`validate-config` applies every source-independent check — enum membership and numeric ranges — without touching a source. Source-dependent checks (crop bounds against the source dimensions, upscale evaluation) happen during preflight.
+
+These fields are additive and do not change `schemaVersion`. Full semantics are in `references/transformations.md`.
 
 ### `limits` object
 
@@ -84,6 +110,18 @@ Highest priority first (spec section 9.3):
 4. Built-in default.
 
 A request-specific override (e.g., "use high quality just this once") MUST take precedence over the saved configuration WITHOUT modifying the file, unless the user explicitly asks to save it.
+
+### Transformation precedence (spec FR-024)
+
+For transformation parameters only (`crop`, `width`, `height`, `speed`, `dither`, `bayerScale`), the order is refined so that a per-clip value beats a batch-wide flag:
+
+1. **Clip-level manifest field.**
+2. Command-line flag.
+3. Top-level manifest field.
+4. Project configuration (`transformations`).
+5. Built-in default.
+
+A clip-level manifest field is more specific than a command-line flag that applies to the whole run, so it wins. Everything else follows the general order above unchanged. See `references/transformations.md`.
 
 ## Restrictions (spec section 9.4)
 

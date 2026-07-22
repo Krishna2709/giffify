@@ -17,21 +17,14 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
-from . import cleanup, errors
+from . import cleanup, errors, transforms
 from .models import EffectiveSettings, LoopValue, SourceInfo, loop_to_ffmpeg
 from .progress import NULL_REPORTER, ProgressReporter
 from .timestamps import format_hhmmss, seconds_str
-
-# Dithering per profile (section 15.5). balanced/high use FFmpeg's default
-# (sierra2_4a); small uses a compression-oriented ordered dither.
-_DITHER_BY_PROFILE = {
-    "small": "bayer:bayer_scale=5",
-    "balanced": "sierra2_4a",
-    "high": "sierra2_4a",
-}
-_DEFAULT_DITHER = "sierra2_4a"
+from .transforms import CropRect
 
 _GRACE_SECONDS = 5.0
 _POLL_INTERVAL = 0.2
@@ -53,46 +46,98 @@ def resolve_effective_settings(
     loop: LoopValue,
     allow_upscale: bool,
     profile_name: str,
+    crop: CropRect | None = None,
+    explicit_width: int | None = None,
+    explicit_height: int | None = None,
+    speed: Decimal | None = None,
+    dither: str | None = None,
+    bayer_scale: int | None = None,
+    warnings: list[str] | None = None,
 ) -> EffectiveSettings:
-    """Compute deterministic output dimensions/fps/colors (FR-014)."""
+    """Compute deterministic output dimensions/fps/colors (FR-014, FR-024..028).
+
+    ``max_width`` is the quality profile's maximum width and applies only when
+    neither ``explicit_width`` nor ``explicit_height`` is supplied; an explicit
+    bound overrides it (FR-026). ``crop`` supplies the effective source geometry
+    for aspect ratio, the width cap, and the no-upscale rule (FR-025). Any
+    UPSCALE_NOT_ALLOWED warning is appended to ``warnings``.
+    """
     disp_w = source.display_width
     disp_h = source.display_height
+    eff_speed = transforms.DEFAULT_SPEED if speed is None else speed
+
+    # The cropped rectangle becomes the effective source geometry (FR-025).
+    if crop is not None:
+        transforms.validate_crop_bounds(crop, disp_w, disp_h)
+        eff_w, eff_h = crop.width, crop.height
+    else:
+        eff_w, eff_h = disp_w, disp_h
 
     # Fallbacks for custom profiles missing a value.
-    if max_width is None:
-        max_width = disp_w  # no cap -> keep source width (no upscale)
     if target_fps is None:
         target_fps = 15
     if colors is None:
         colors = 256
     colors = max(2, min(256, int(colors)))
 
-    out_w = int(max_width) if allow_upscale else min(disp_w, int(max_width))
-    out_w = max(1, out_w)
-    out_h = max(1, round(disp_h * out_w / disp_w))
+    dims = transforms.resolve_output_dimensions(
+        eff_w,
+        eff_h,
+        width=explicit_width,
+        height=explicit_height,
+        profile_max_width=max_width,
+        allow_upscale=allow_upscale,
+    )
+    if dims.warning is not None and warnings is not None and dims.warning not in warnings:
+        warnings.append(dims.warning)
 
-    # Effective fps must not exceed the source frame rate (FR-014).
+    # Effective fps must not exceed the source frame rate (FR-014); below 1.0x
+    # the ceiling is the retimed stream's intrinsic rate (FR-027).
     effective_fps: float = float(target_fps)
     if source.fps and source.fps > 0:
-        effective_fps = min(float(target_fps), source.fps)
+        fps_ceiling = transforms.effective_source_fps(source.fps, eff_speed)
+        effective_fps = min(float(target_fps), fps_ceiling)
     # Normalize to a clean number where possible.
     if abs(effective_fps - round(effective_fps)) < 1e-6:
         effective_fps = float(round(effective_fps))
 
+    mode, scale = transforms.resolve_dither(
+        dither=dither, bayer_scale=bayer_scale, profile_name=profile_name
+    )
+
     return EffectiveSettings(
-        width=out_w,
-        height=out_h,
+        width=dims.width,
+        height=dims.height,
         fps=effective_fps,
         colors=colors,
         loop=loop,
         profile_name=profile_name,
+        crop=crop,
+        speed=eff_speed,
+        dither=mode,
+        bayer_scale=scale,
+        upscaled=dims.upscaled,
+        source_width=disp_w,
+        source_height=disp_h,
+        effective_source_width=eff_w,
+        effective_source_height=eff_h,
     )
 
 
-def _fps_arg(fps: float) -> str:
-    if abs(fps - round(fps)) < 1e-6:
-        return str(round(fps))
-    return f"{fps:.5f}".rstrip("0").rstrip(".")
+# Retained alias: the frame-rate serializer now lives in vtg.transforms so the
+# filter chain is built in exactly one place (SEC-018).
+_fps_arg = transforms.fps_arg
+
+
+def _chain(settings: EffectiveSettings) -> str:
+    """The shared crop/setpts/fps/scale chain for both palette passes (15.2)."""
+    return transforms.build_filter_chain(
+        crop=settings.crop,
+        speed=settings.speed,
+        fps=settings.fps,
+        width=settings.width,
+        height=settings.height,
+    )
 
 
 def build_palettegen_command(
@@ -103,11 +148,7 @@ def build_palettegen_command(
     settings: EffectiveSettings,
     palette_path: str,
 ) -> list[str]:
-    vf = (
-        f"fps={_fps_arg(settings.fps)},"
-        f"scale={settings.width}:{settings.height}:flags=lanczos,"
-        f"palettegen=max_colors={settings.colors}:stats_mode=diff"
-    )
+    vf = f"{_chain(settings)},palettegen=max_colors={settings.colors}:stats_mode=diff"
     return [
         ffmpeg,
         "-y",
@@ -141,12 +182,11 @@ def build_paletteuse_command(
     palette_path: str,
     out_path: str,
 ) -> list[str]:
-    dither = _DITHER_BY_PROFILE.get(settings.profile_name, _DEFAULT_DITHER)
-    lavfi = (
-        f"fps={_fps_arg(settings.fps)},"
-        f"scale={settings.width}:{settings.height}:flags=lanczos[x];"
-        f"[x][1:v]paletteuse=dither={dither}"
-    )
+    mode, scale = settings.effective_dither
+    dither = transforms.dither_filter_arg(mode, scale)
+    # Steps 4-7 are byte-identical to the palettegen pass so the palette is
+    # derived from exactly the frames that are encoded (SEC-018, section 15.2).
+    lavfi = f"{_chain(settings)}[x];[x][1:v]paletteuse=dither={dither}"
     return [
         ffmpeg,
         "-y",
@@ -175,6 +215,52 @@ def build_paletteuse_command(
     ]
 
 
+def build_preview_command(
+    ffmpeg: str,
+    source: str,
+    at_ms: int,
+    settings: EffectiveSettings,
+    out_path: str,
+) -> list[str]:
+    """Build the single-frame PNG extraction command (FR-029, section 15.2).
+
+    Uses steps 1-4 and 7 only: seek, decode, orientation normalization, crop,
+    and scale. No frame-rate conversion, no retiming, and no palette pass, so
+    the still is full colour and never palette-quantized.
+    """
+    vf = transforms.build_preview_filter_chain(
+        crop=settings.crop, width=settings.width, height=settings.height
+    )
+    return [
+        ffmpeg,
+        "-y",
+        "-hide_banner",
+        "-v",
+        "error",
+        "-nostdin",
+        "-protocol_whitelist",
+        "file,pipe",
+        "-ss",
+        format_hhmmss(at_ms),
+        "-i",
+        source,
+        "-an",
+        "-vf",
+        vf,
+        "-frames:v",
+        "1",
+        "-update",
+        "1",
+        "-pix_fmt",
+        "rgb24",
+        "-c:v",
+        "png",
+        "-f",
+        "image2",
+        out_path,
+    ]
+
+
 @dataclass
 class ConversionResult:
     path: str
@@ -190,6 +276,11 @@ def _popen_kwargs() -> dict[str, Any]:
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.PIPE,
         "text": True,
+        # FFmpeg writes UTF-8 diagnostics that quote the input path verbatim, so
+        # a CJK/Cyrillic/emoji filename would fail to decode under the locale
+        # default on Windows. Decode as UTF-8 and never raise (section 13.5).
+        "encoding": "utf-8",
+        "errors": "replace",
     }
     if os.name == "posix":
         kwargs["start_new_session"] = True  # own process group for group signals
@@ -345,14 +436,14 @@ def run_guarded(
         )
 
 
-def _verify_gif(path: str) -> int:
+def _verify_output(path: str, *, magic: bytes, label: str, stage: str) -> int:
     if not os.path.exists(path):
         raise errors.EngineError(
             errors.FFMPEG_FAILED,
             "FFmpeg did not produce an output file.",
             exit_code=errors.EXIT_FFMPEG_FAILED,
             status=errors.STATUS_FAILED,
-            stage="encode",
+            stage=stage,
         )
     size = os.path.getsize(path)
     if size <= 0:
@@ -361,19 +452,28 @@ def _verify_gif(path: str) -> int:
             "FFmpeg produced an empty output file.",
             exit_code=errors.EXIT_FFMPEG_FAILED,
             status=errors.STATUS_FAILED,
-            stage="encode",
+            stage=stage,
         )
     with open(path, "rb") as fh:
-        header = fh.read(6)
-    if not header.startswith(b"GIF8"):
+        header = fh.read(len(magic))
+    if not header.startswith(magic):
         raise errors.EngineError(
             errors.FFMPEG_FAILED,
-            "Output file is not a valid GIF.",
+            f"Output file is not a valid {label}.",
             exit_code=errors.EXIT_FFMPEG_FAILED,
             status=errors.STATUS_FAILED,
-            stage="encode",
+            stage=stage,
         )
     return size
+
+
+def _verify_gif(path: str) -> int:
+    return _verify_output(path, magic=b"GIF8", label="GIF", stage="encode")
+
+
+def _verify_png(path: str) -> int:
+    """Verify a non-empty PNG (section 15.2 step 11, adapted for FR-029)."""
+    return _verify_output(path, magic=b"\x89PNG\r\n\x1a\n", label="PNG", stage="preview")
 
 
 def convert_clip(
@@ -459,4 +559,65 @@ def convert_clip(
         width=settings.width,
         height=settings.height,
         fps=settings.fps,
+    )
+
+
+@dataclass
+class PreviewResult:
+    path: str
+    size_bytes: int
+    width: int
+    height: int
+    at_ms: int
+
+
+def extract_preview(
+    ffmpeg: str,
+    source: SourceInfo,
+    *,
+    at_ms: int,
+    settings: EffectiveSettings,
+    dest_path: str,
+    output_dir: str,
+    timeout_seconds: float,
+    max_temp_bytes: int,
+    keep_temporary_files: bool = False,
+    clip_index: int = 0,
+    cancel_event: threading.Event | None = None,
+    reporter: ProgressReporter = NULL_REPORTER,
+) -> PreviewResult:
+    """Extract one full-colour PNG still (FR-029, sections 15.2/15.3).
+
+    Temporary output, verification, atomic move, cancellation, cleanup, and the
+    resource limits of SEC-011 all apply exactly as they do for a GIF.
+    """
+    fd, temp_out = tempfile.mkstemp(prefix=".vtg-", suffix=".png.tmp", dir=output_dir)
+    os.close(fd)
+    temp_paths = [temp_out]
+
+    try:
+        reporter.stage_progress(clip_index, "preview", 0.0)
+        run_guarded(
+            build_preview_command(ffmpeg, source.path, at_ms, settings, temp_out),
+            stage="preview",
+            clip_index=clip_index,
+            timeout_seconds=timeout_seconds,
+            temp_paths=temp_paths,
+            max_temp_bytes=max_temp_bytes,
+            cancel_event=cancel_event,
+        )
+        size = _verify_png(temp_out)
+        reporter.stage_progress(clip_index, "preview", 100.0)
+        os.replace(temp_out, dest_path)
+    except BaseException:
+        if not keep_temporary_files:
+            _remove_paths([temp_out])
+        raise
+
+    return PreviewResult(
+        path=dest_path,
+        size_bytes=size,
+        width=settings.width,
+        height=settings.height,
+        at_ms=at_ms,
     )

@@ -50,7 +50,7 @@ from pathlib import Path
 
 SKILL_NAME = "video-to-gif"
 PLUGIN_DESCRIPTION = "Generate optimized animated GIFs from explicit video timestamp ranges."
-PLUGIN_VERSION = "0.2.0"
+PLUGIN_VERSION = "0.3.0"
 PLUGIN_AUTHOR = {"name": "Krishna2709", "url": "https://github.com/Krishna2709"}
 
 # Media files are a contamination signal: they must never appear in the

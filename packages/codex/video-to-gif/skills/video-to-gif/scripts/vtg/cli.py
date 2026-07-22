@@ -11,20 +11,33 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import signal
 import sys
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import FrameType
 from typing import Any, NoReturn
 
-from . import __version__, cleanup, dependencies, errors, ffmpeg, manifests, models, naming, paths
+from . import (
+    __version__,
+    cleanup,
+    dependencies,
+    errors,
+    ffmpeg,
+    manifests,
+    models,
+    naming,
+    paths,
+    transforms,
+)
 from . import config as config_mod
 from . import remote as remote_mod
 from .inspect import inspect_source
 from .models import BUILTIN_PROFILES, ClipSpec, EffectiveSettings, SourceInfo
 from .progress import ProgressReporter
+from .timestamps import parse_timestamp
 
 SCHEMA_VERSION = 1
 
@@ -47,6 +60,18 @@ class PlannedClip:
     collided: bool
 
 
+# Settings that a still frame cannot express (FR-029). Supplying any of them to
+# `preview` is accepted, changes nothing, and produces one warning.
+_PREVIEW_IGNORED_FLAGS: tuple[tuple[str, str], ...] = (
+    ("speed", "speed"),
+    ("fps", "fps"),
+    ("loop", "loop"),
+    ("colors", "colors"),
+    ("dither", "dither"),
+    ("bayer_scale", "bayerScale"),
+)
+
+
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
@@ -57,6 +82,39 @@ class _ArgumentParser(argparse.ArgumentParser):
         self.print_usage(sys.stderr)
         sys.stderr.write(f"{self.prog}: error: {message}\n")
         raise SystemExit(errors.EXIT_INVALID_USAGE)
+
+
+# Value-taking transformation flags whose value may legitimately begin with a
+# dash (a negative number or a crop rectangle with a negative offset).
+_DASH_VALUE_FLAGS = frozenset({"--crop", "--width", "--height", "--speed", "--bayer-scale"})
+_NEGATIVE_VALUE_RE = re.compile(r"^-[0-9]")
+
+
+def normalize_argv(argv: list[str]) -> list[str]:
+    """Rewrite ``--flag -1...`` as ``--flag=-1...`` for transformation flags.
+
+    argparse treats any token starting with a dash as an option, so a negative
+    transformation value would fail as a usage error (exit 2) instead of
+    reaching validation. FR-025 through FR-027 require a negative value to be
+    rejected during preflight with its own error code and exit code 6, so the
+    pair is joined here. Only a token matching ``-<digit>`` is joined, so a real
+    flag is never swallowed and a genuine "missing value" stays a usage error.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if (
+            token in _DASH_VALUE_FLAGS
+            and i + 1 < len(argv)
+            and _NEGATIVE_VALUE_RE.match(argv[i + 1])
+        ):
+            out.append(f"{token}={argv[i + 1]}")
+            i += 2
+            continue
+        out.append(token)
+        i += 1
+    return out
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -103,6 +161,36 @@ def build_parser() -> argparse.ArgumentParser:
             help="Explicitly approve a private/loopback IP for SSRF checks (SEC-014); repeatable.",
         )
 
+    def add_transforms(p: argparse.ArgumentParser) -> None:
+        # Transformation flags (spec section 12.10, FR-025..FR-028). Values are
+        # accepted as text and parsed by vtg.transforms during preflight so an
+        # invalid value produces the specific error code with exit 6 rather than
+        # argparse's generic usage error (SEC-018).
+        p.add_argument(
+            "--crop",
+            metavar="X:Y:W:H",
+            help="Crop rectangle in orientation-normalized source pixels (FR-025).",
+        )
+        p.add_argument(
+            "--width", metavar="PIXELS", help="Maximum output width, 2 to 8192 (FR-026)."
+        )
+        p.add_argument(
+            "--height", metavar="PIXELS", help="Maximum output height, 2 to 8192 (FR-026)."
+        )
+        p.add_argument(
+            "--speed",
+            metavar="MULTIPLIER",
+            help="Playback speed multiplier, 0.25 to 4.0 (FR-027).",
+        )
+        p.add_argument(
+            "--dither",
+            metavar="MODE",
+            help="Dither mode: " + ", ".join(transforms.DITHER_MODES) + " (FR-028).",
+        )
+        p.add_argument(
+            "--bayer-scale", metavar="N", help="Bayer scale 0 to 5, for dither=bayer (FR-028)."
+        )
+
     p_doctor = sub.add_parser("doctor", help="Check the environment and dependencies.")
     p_doctor.add_argument(
         "--output-directory", help="Optionally check this output directory is writable."
@@ -125,7 +213,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_create.add_argument("--output-name", help="Bare output filename (no path separators).")
     p_create.add_argument("--collision-policy", choices=sorted(models.VALID_COLLISION_POLICIES))
     p_create.add_argument("--loop", help="forever, once, or an integer >= 1.")
-    p_create.add_argument("--width", type=int)
     p_create.add_argument("--fps", type=int)
     p_create.add_argument("--colors", type=int)
     p_create.add_argument("--allow-upscale", action="store_true")
@@ -136,6 +223,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="fail",
     )
     p_create.add_argument("--config", help="Explicit config file path.")
+    add_transforms(p_create)
     add_remote(p_create)
     add_common(p_create)
 
@@ -145,6 +233,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_batch.add_argument("--profile", choices=sorted(models.VALID_PROFILE_NAMES))
     p_batch.add_argument("--output-directory")
     p_batch.add_argument("--collision-policy", choices=sorted(models.VALID_COLLISION_POLICIES))
+    p_batch.add_argument("--allow-upscale", action="store_true")
     p_batch.add_argument("--allow-outside-project", action="store_true")
     p_batch.add_argument("--dry-run", action="store_true", help="Preflight only; do not encode.")
     p_batch.add_argument(
@@ -153,8 +242,31 @@ def build_parser() -> argparse.ArgumentParser:
         default="fail",
     )
     p_batch.add_argument("--config", help="Explicit config file path.")
+    add_transforms(p_batch)
     add_remote(p_batch)
     add_common(p_batch)
+
+    # Preview frames (spec section 12.9, FR-029).
+    p_preview = sub.add_parser(
+        "preview", help="Extract a single still PNG instead of producing a GIF."
+    )
+    p_preview.add_argument("--input", help="Path to the source video or URL.")
+    p_preview.add_argument("--manifest", help="Produce one still per clip at that clip's start.")
+    p_preview.add_argument("--at", help="Timestamp of the frame to extract (FR-004 format).")
+    p_preview.add_argument("--profile", choices=sorted(models.VALID_PROFILE_NAMES))
+    p_preview.add_argument("--output-directory")
+    p_preview.add_argument("--output-name", help="Bare .png filename (no path separators).")
+    p_preview.add_argument("--collision-policy", choices=sorted(models.VALID_COLLISION_POLICIES))
+    p_preview.add_argument("--loop", help="Accepted for parity with create; ignored (FR-029).")
+    p_preview.add_argument("--fps", type=int)
+    p_preview.add_argument("--colors", type=int)
+    p_preview.add_argument("--allow-upscale", action="store_true")
+    p_preview.add_argument("--allow-outside-project", action="store_true")
+    p_preview.add_argument("--dry-run", action="store_true", help="Preflight only; write nothing.")
+    p_preview.add_argument("--config", help="Explicit config file path.")
+    add_transforms(p_preview)
+    add_remote(p_preview)
+    add_common(p_preview)
 
     p_vc = sub.add_parser("validate-config", help="Validate a configuration file.")
     p_vc.add_argument("--config", required=True)
@@ -172,9 +284,45 @@ def build_parser() -> argparse.ArgumentParser:
 # ---------------------------------------------------------------------------
 
 
+def configure_output_encoding() -> None:
+    """Force UTF-8 on stdout/stderr before anything is written (spec section 13.5).
+
+    ``sys.stdout``/``sys.stderr`` default to the host locale encoding, which on
+    Windows is the console codepage (cp1252/cp437 on the CI runners). Writing any
+    character outside that codepage -- a Unicode digit echoed back in a validation
+    error, a CJK/Cyrillic/emoji source filename, a non-ASCII clip name from a
+    manifest -- then raises ``UnicodeEncodeError`` inside the writer. That escapes
+    the engine's error contract entirely: the process dies with exit code 1, which
+    section 14 deliberately does not define, and stdout carries no structured
+    result at all, leaving the agent layer blind.
+
+    Pinning both streams to UTF-8 makes the encoding independent of the host
+    locale on every supported platform (section 6.1). ``errors="backslashreplace"``
+    guarantees the call can never itself raise: a path that survived
+    ``os.fsdecode`` on POSIX may contain lone surrogates, which even UTF-8 cannot
+    encode strictly.
+
+    Streams replaced by in-process test doubles (``io.StringIO``) have no
+    ``reconfigure``; they are already text-native and need no adjustment, so the
+    missing attribute is not an error.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (AttributeError, OSError, ValueError):  # pragma: no cover - detached stream
+            continue
+
+
 def _emit(result: dict[str, Any], json_mode: bool) -> None:
     if json_mode:
-        sys.stdout.write(json.dumps(result, ensure_ascii=False) + "\n")
+        # ensure_ascii=True (spec section 13.5): the contract document is pure
+        # ASCII, so it survives any downstream consumer, pipe or redirection
+        # whatever their encoding. Non-ASCII becomes \uXXXX escapes, which
+        # json.loads restores to the identical string.
+        sys.stdout.write(json.dumps(result, ensure_ascii=True) + "\n")
         sys.stdout.flush()
     else:
         _emit_human(result)
@@ -197,6 +345,19 @@ def _emit_human(result: dict[str, Any]) -> None:
             sys.stderr.write(f"  hint: {err['remediation']}\n")
         return
     summary = result.get("summary", {})
+    if command == "preview":
+        out = result.get("outputDirectory", "./output")
+        if status == "dry_run":
+            print(
+                f"dry run: {summary.get('planned', 0)} preview(s) planned, "
+                f"{summary.get('collisions', 0)} collision(s)."
+            )
+        else:
+            msg = f"Extracted {summary.get('previews', 0)} preview frame(s) in {out}"
+            if summary.get("failed"):
+                msg += f"; {summary['failed']} failed"
+            print(msg + ".")
+        return
     if command in ("create", "batch"):
         out = result.get("outputDirectory", "./output")
         created = summary.get("created", 0)
@@ -339,26 +500,57 @@ def _make_settings_resolver(
     top_colors: int | None,
     top_loop: models.LoopValue,
     allow_upscale: bool,
+    cli_transforms: transforms.TransformSpec | None = None,
+    manifest_transforms: transforms.TransformSpec | None = None,
+    config_transforms: transforms.TransformSpec | None = None,
+    warnings: list[str] | None = None,
 ) -> Callable[[ClipSpec], EffectiveSettings]:
+    """Build the per-clip settings resolver.
+
+    Transformation precedence is the FR-024 order, highest first: the clip-level
+    manifest field, the command-line flag, the top-level manifest field, project
+    configuration, then the built-in default. This deliberately ranks a
+    clip-level field above a batch-wide flag (section 9.3).
+    """
+    # Legacy callers pass the merged explicit width as ``top_width``; treat it as
+    # the command-line level so the precedence chain stays a single code path.
+    cli_level = (
+        cli_transforms if cli_transforms is not None else transforms.TransformSpec(width=top_width)
+    )
+
     def resolve(clip: ClipSpec) -> EffectiveSettings:
         profile_name = clip.profile or top_profile
         builtin = BUILTIN_PROFILES.get(profile_name)
-        base_w = builtin.max_width if builtin else None
         base_fps = builtin.fps if builtin else None
         base_colors = builtin.max_colors if builtin else None
-        max_width = _first(clip.width, top_width, base_w)
+        tx = transforms.merge_transforms(
+            clip.transform_spec, cli_level, manifest_transforms, config_transforms
+        )
         target_fps = _first(clip.fps, top_fps, base_fps)
         colors = _first(clip.colors, top_colors, base_colors)
         loop = _first(clip.loop, top_loop) or "forever"
-        return ffmpeg.resolve_effective_settings(
-            source,
-            max_width=max_width,
-            target_fps=target_fps,
-            colors=colors,
-            loop=loop,
-            allow_upscale=allow_upscale,
-            profile_name=profile_name,
-        )
+        try:
+            return ffmpeg.resolve_effective_settings(
+                source,
+                max_width=builtin.max_width if builtin else None,
+                target_fps=target_fps,
+                colors=colors,
+                loop=loop,
+                allow_upscale=allow_upscale,
+                profile_name=profile_name,
+                crop=tx.crop,
+                explicit_width=tx.width,
+                explicit_height=tx.height,
+                speed=tx.speed,
+                dither=tx.dither,
+                bayer_scale=tx.bayer_scale,
+                warnings=warnings,
+            )
+        except errors.EngineError as exc:
+            # Attribute a transformation failure to the clip it came from.
+            if exc.clip_index is None:
+                exc.clip_index = clip.index
+            raise
 
     return resolve
 
@@ -403,18 +595,9 @@ def validate_and_filter(
             f"end ({clip.end_ms} ms) is beyond source duration ({duration_ms} ms)"
         )
         if policy == "clamp" and clampable and non_clampable is None:
-            clamped = ClipSpec(
-                index=clip.index,
-                start_ms=clip.start_ms,
-                end_ms=duration_ms,
-                name=clip.name,
-                profile=clip.profile,
-                width=clip.width,
-                fps=clip.fps,
-                colors=clip.colors,
-                loop=clip.loop,
-            )
-            valid.append(clamped)
+            # replace() carries every clip field forward, including the v0.3.0
+            # transformation fields, so a clamped clip keeps its settings.
+            valid.append(replace(clip, end_ms=duration_ms))
             continue
         if policy == "skip":
             skipped.append({"clipIndex": clip.index, "reason": reason, "stage": "validate"})
@@ -445,7 +628,13 @@ def plan_outputs(
     output_dir: str,
     collision_policy: str,
     resolve_settings: Callable[[ClipSpec], EffectiveSettings],
+    namer: Callable[[ClipSpec, str], str] | None = None,
 ) -> list[PlannedClip]:
+    """Resolve settings, names, and collisions for every clip (15.1 steps 9-13).
+
+    ``namer`` overrides the default ``.gif`` naming; the preview command supplies
+    the FR-029 ``.png`` naming through it.
+    """
     source_stem = os.path.splitext(os.path.basename(source.path))[0]
     planned: list[PlannedClip] = []
     reserved: set = set()
@@ -455,7 +644,9 @@ def plan_outputs(
 
     for clip in clips:
         settings = resolve_settings(clip)
-        if clip.name:
+        if namer is not None:
+            base_fn = namer(clip, source_stem)
+        elif clip.name:
             base_fn = naming.sanitize_output_name(clip.name)
         else:
             base_fn = naming.default_output_name(source_stem, clip.start_ms, clip.end_ms)
@@ -535,17 +726,37 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
 
 def _clip_result(planned: PlannedClip, conv: ffmpeg.ConversionResult) -> dict[str, Any]:
     clip = planned.clip
+    settings = planned.settings
     return {
         "clipIndex": clip.index,
         "name": clip.name,
         "path": _display_path(conv.path),
         "startMs": clip.start_ms,
         "endMs": clip.end_ms,
+        # durationMs remains the selected SOURCE range duration; outputDurationMs
+        # is the duration of the generated GIF after speed retiming (FR-030).
         "durationMs": clip.duration_ms,
+        "outputDurationMs": transforms.output_duration_ms(clip.duration_ms, settings.speed),
         "width": conv.width,
         "height": conv.height,
         "fps": conv.fps,
         "sizeBytes": conv.size_bytes,
+        "transformations": settings.transformations_public(),
+    }
+
+
+def _preview_result_entry(planned: PlannedClip, prev: ffmpeg.PreviewResult) -> dict[str, Any]:
+    """Serialize one entry of the ``previews`` array (section 13.4, FR-030)."""
+    clip = planned.clip
+    return {
+        "clipIndex": clip.index,
+        "name": clip.name,
+        "path": _display_path(prev.path),
+        "atMs": prev.at_ms,
+        "width": prev.width,
+        "height": prev.height,
+        "sizeBytes": prev.size_bytes,
+        "transformations": planned.settings.transformations_public(still_frame=True),
     }
 
 
@@ -729,11 +940,24 @@ def _prepare_job(
     )
     warnings: list[str] = list(cfg.warnings)
 
-    # Manifest (batch) vs single clip (create).
+    # Manifest (batch, and the preview manifest form) vs single clip (create).
     manifest: manifests.Manifest | None = None
-    if command == "batch":
+    if command == "batch" or (command == "preview" and getattr(args, "manifest", None)):
         manifest = manifests.load_manifest_file(args.manifest)
         warnings.extend(manifest.warnings)
+
+    # Transformation flags are parsed and range-checked here, during preflight,
+    # before any FFmpeg process is started (FR-024, section 12.10, SEC-018).
+    cli_tx = transforms.parse_cli_transforms(
+        crop=getattr(args, "crop", None),
+        width=getattr(args, "width", None),
+        height=getattr(args, "height", None),
+        speed=getattr(args, "speed", None),
+        dither=getattr(args, "dither", None),
+        bayer_scale=getattr(args, "bayer_scale", None),
+    )
+    manifest_tx = manifest.transform_spec if manifest else transforms.EMPTY_TRANSFORMS
+    config_tx = cfg.transform_spec
 
     tools = dependencies.require_ffmpeg_tools()
 
@@ -794,7 +1018,6 @@ def _prepare_job(
     if continue_on_error is None:
         continue_on_error = True
 
-    top_width = _first(getattr(args, "width", None), manifest.width if manifest else None)
     top_fps = _first(getattr(args, "fps", None), manifest.fps if manifest else None)
     top_colors = _first(getattr(args, "colors", None), manifest.colors if manifest else None)
     allow_upscale = bool(getattr(args, "allow_upscale", False)) or (
@@ -811,14 +1034,20 @@ def _prepare_job(
         "output_dir": output_dir,
         "collision_policy": collision_policy,
         "continue_on_error": continue_on_error,
+        "cli_transforms": cli_tx,
+        "manifest_transforms": manifest_tx,
         "resolver": _make_settings_resolver(
             source,
             top_profile=top_profile,
-            top_width=top_width,
+            top_width=None,
             top_fps=top_fps,
             top_colors=top_colors,
             top_loop=top_loop,
             allow_upscale=allow_upscale,
+            cli_transforms=cli_tx,
+            manifest_transforms=manifest_tx,
+            config_transforms=config_tx,
+            warnings=warnings,
         ),
     }
 
@@ -857,13 +1086,15 @@ def _build_create_clip(args: argparse.Namespace) -> ClipSpec:
     assert resolved_end is not None
     loop = models.parse_loop(args.loop) if getattr(args, "loop", None) else None
     name = args.output_name if getattr(args, "output_name", None) else None
+    # Transformation flags are carried by the command-line precedence level, not
+    # by the clip: a ClipSpec field is the clip-level manifest value, which
+    # outranks a flag (FR-024).
     return ClipSpec(
         index=0,
         start_ms=start_ms,
         end_ms=resolved_end,
         name=name,
         profile=args.profile,
-        width=args.width,
         fps=args.fps,
         colors=args.colors,
         loop=loop,
@@ -977,6 +1208,296 @@ def _cmd_batch(args: argparse.Namespace) -> int:
         job.cleanup()
 
 
+# ---------------------------------------------------------------------------
+# Preview frames (spec FR-029, sections 12.9 / 13.4)
+# ---------------------------------------------------------------------------
+
+
+def _preview_ignored_warning(
+    args: argparse.Namespace, manifest: manifests.Manifest | None
+) -> str | None:
+    """Build the one-per-invocation TRANSFORMATION_NOT_APPLICABLE warning.
+
+    Temporal and palette settings are accepted so a preview can be requested
+    with the same settings as the GIF it previews, but they cannot change a
+    still frame (FR-029).
+    """
+    supplied: list[str] = []
+    for attr, public in _PREVIEW_IGNORED_FLAGS:
+        if getattr(args, attr, None) is not None:
+            supplied.append(public)
+    if manifest is not None:
+        for attr, public in (
+            ("speed", "speed"),
+            ("fps", "fps"),
+            ("loop", "loop"),
+            ("colors", "colors"),
+            ("dither", "dither"),
+            ("bayer_scale", "bayerScale"),
+        ):
+            if getattr(manifest, attr, None) is not None and public not in supplied:
+                supplied.append(public)
+        for clip in manifest.clips:
+            for attr, public in (
+                ("speed", "speed"),
+                ("fps", "fps"),
+                ("loop", "loop"),
+                ("colors", "colors"),
+                ("dither", "dither"),
+                ("bayer_scale", "bayerScale"),
+            ):
+                if getattr(clip, attr, None) is not None and public not in supplied:
+                    supplied.append(public)
+    if not supplied:
+        return None
+    order = [public for _attr, public in _PREVIEW_IGNORED_FLAGS]
+    supplied.sort(key=order.index)
+    return transforms.not_applicable_warning(supplied)
+
+
+def _preview_clips(args: argparse.Namespace, manifest: manifests.Manifest | None) -> list[ClipSpec]:
+    """Build the clip list for a preview job (FR-029)."""
+    if manifest is not None:
+        if getattr(args, "at", None) is not None:
+            raise errors.EngineError(
+                errors.INVALID_USAGE,
+                "preview accepts either --manifest or --at, not both.",
+                exit_code=errors.EXIT_INVALID_USAGE,
+                status=errors.STATUS_VALIDATION_FAILED,
+                stage="validate",
+                remediation="The manifest form previews each clip at its start timestamp.",
+            )
+        return list(manifest.clips)
+    if not getattr(args, "at", None):
+        raise errors.EngineError(
+            errors.INVALID_USAGE,
+            "preview requires --at <timestamp> when --manifest is not supplied.",
+            exit_code=errors.EXIT_INVALID_USAGE,
+            status=errors.STATUS_VALIDATION_FAILED,
+            stage="validate",
+            remediation="Provide --at, e.g. --at 00:01:02.500.",
+        )
+    at_ms = parse_timestamp(args.at, field_path="at")
+    name = args.output_name if getattr(args, "output_name", None) else None
+    # end_ms is unused by preview extraction; a still has no range.
+    return [ClipSpec(index=0, start_ms=at_ms, end_ms=at_ms, name=name, profile=args.profile)]
+
+
+def _validate_preview_times(clips: list[ClipSpec], duration_ms: int) -> None:
+    """Enforce ``0 <= at < source duration`` for every preview frame (FR-029)."""
+    for clip in clips:
+        if clip.start_ms < 0 or clip.start_ms >= duration_ms:
+            raise errors.EngineError(
+                errors.INVALID_TIMESTAMP,
+                f"Preview timestamp {clip.start_ms} ms is outside the source duration "
+                f"(0 to {duration_ms} ms, exclusive of the end).",
+                exit_code=errors.EXIT_INVALID_TIMESTAMP,
+                status=errors.STATUS_VALIDATION_FAILED,
+                stage="validate",
+                clip_index=clip.index,
+                remediation="Choose a timestamp inside the source duration.",
+            )
+
+
+def _preview_namer(explicit_name: str | None) -> Callable[[ClipSpec, str], str]:
+    """Return the FR-029 preview name builder.
+
+    An explicit ``--output-name`` is sanitized under FR-011 with ``.png``
+    substituted for ``.gif``; otherwise a named clip yields
+    ``<clip-name>_<start>.png`` and an unnamed one ``<video-stem>_<at>.png``.
+    """
+
+    def namer(clip: ClipSpec, source_stem: str) -> str:
+        if explicit_name is not None:
+            return naming.sanitize_preview_name(explicit_name)
+        stem = clip.name if clip.name else source_stem
+        return naming.default_preview_name(stem, clip.start_ms)
+
+    return namer
+
+
+def _preview_dry_run_result(
+    source: SourceInfo,
+    planned: list[PlannedClip],
+    output_dir: str,
+    warnings: list[str],
+) -> dict[str, Any]:
+    collisions = 0
+    plan_entries = []
+    for p in planned:
+        if p.action == "collision":
+            collisions += 1
+        plan_entries.append(
+            {
+                "clipIndex": p.clip.index,
+                "name": p.clip.name,
+                "path": _display_path(p.dest_path),
+                "atMs": p.clip.start_ms,
+                "width": p.settings.width,
+                "height": p.settings.height,
+                "action": p.action,
+                "collision": p.collided,
+                "estimatedWorkUnits": 1,
+            }
+        )
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "command": "preview",
+        "status": errors.STATUS_DRY_RUN,
+        "source": source.to_public(),
+        "outputDirectory": _display_path(output_dir),
+        "plan": plan_entries,
+        "skipped": [],
+        "warnings": warnings,
+        "summary": {
+            "requested": len(planned),
+            "planned": len([p for p in planned if p.action != "collision"]),
+            "collisions": collisions,
+            "skipped": 0,
+            "previews": 0,
+        },
+    }
+
+
+def _run_previews(
+    planned: list[PlannedClip],
+    source: SourceInfo,
+    cfg: config_mod.Config,
+    tools: dict[str, str],
+    reporter: ProgressReporter,
+    *,
+    continue_on_error: bool,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    previews: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    total = len(planned)
+
+    for i, planned_clip in enumerate(planned):
+        clip = planned_clip.clip
+        if planned_clip.action == "skip":
+            skipped.append({"clipIndex": clip.index, "reason": "output exists (skip policy)"})
+            reporter.clip_skipped(clip.index, "collision-skip")
+            continue
+        if _CANCEL_EVENT.is_set():
+            raise errors.CancelledError(clip_index=clip.index)
+
+        reporter.clip_started(clip.index, total, clip.name)
+        try:
+            prev = ffmpeg.extract_preview(
+                tools["ffmpeg"],
+                source,
+                at_ms=clip.start_ms,
+                settings=planned_clip.settings,
+                dest_path=planned_clip.dest_path,
+                output_dir=os.path.dirname(planned_clip.dest_path),
+                timeout_seconds=cfg.max_clip_processing_seconds,
+                max_temp_bytes=cfg.max_temporary_bytes,
+                keep_temporary_files=cfg.keep_temporary_files,
+                clip_index=clip.index,
+                cancel_event=_CANCEL_EVENT,
+                reporter=reporter,
+            )
+        except errors.CancelledError:
+            raise
+        except errors.EngineError as exc:
+            # A failed preview is reported in `failed` with its stage and code,
+            # and counts as a failure rather than a created output (FR-029).
+            failed.append(exc.to_dict())
+            reporter.clip_failed(clip.index, exc.code, exc.message)
+            if not continue_on_error:
+                for remaining in planned[i + 1 :]:
+                    skipped.append(
+                        {
+                            "clipIndex": remaining.clip.index,
+                            "reason": "not processed (stopped after an earlier failure)",
+                        }
+                    )
+                    reporter.clip_skipped(remaining.clip.index, "stopped-on-error")
+                break
+        else:
+            previews.append(_preview_result_entry(planned_clip, prev))
+            reporter.clip_completed(clip.index, _display_path(prev.path))
+
+    return previews, failed, skipped
+
+
+def _cmd_preview(args: argparse.Namespace) -> int:
+    reporter = ProgressReporter(enabled=not args.no_progress)
+    job = _JobCleanup()
+    try:
+        if not getattr(args, "input", None) and not getattr(args, "manifest", None):
+            raise errors.EngineError(
+                errors.INVALID_USAGE,
+                "preview requires --input or --manifest.",
+                exit_code=errors.EXIT_INVALID_USAGE,
+                status=errors.STATUS_VALIDATION_FAILED,
+                stage="validate",
+            )
+        # An invalid --output-name extension fails before any other work (FR-029).
+        if getattr(args, "output_name", None):
+            naming.sanitize_preview_name(args.output_name)
+
+        ctx = _prepare_job(args, "preview", reporter=reporter, job=job)
+        source: SourceInfo = ctx["source"]
+        manifest: manifests.Manifest | None = ctx["manifest"]
+        warnings: list[str] = ctx["warnings"]
+
+        ignored = _preview_ignored_warning(args, manifest)
+        if ignored is not None:
+            warnings.append(ignored)
+
+        clips = _preview_clips(args, manifest)
+        _validate_preview_times(clips, source.duration_ms)
+
+        planned = plan_outputs(
+            clips,
+            source,
+            output_dir=ctx["output_dir"],
+            collision_policy=ctx["collision_policy"],
+            resolve_settings=ctx["resolver"],
+            namer=_preview_namer(getattr(args, "output_name", None)),
+        )
+
+        if args.dry_run:
+            result = _preview_dry_run_result(source, planned, ctx["output_dir"], warnings)
+            _emit_job(result, args, job)
+            return errors.EXIT_SUCCESS
+
+        if any(p.action == "collision" for p in planned):
+            result = _collision_result("preview", planned, ctx["output_dir"], warnings)
+            _emit_job(result, args, job)
+            return errors.EXIT_COLLISION
+
+        paths.ensure_directory(ctx["output_dir"])
+        previews, failed, skipped = _run_previews(
+            planned,
+            source,
+            ctx["cfg"],
+            ctx["tools"],
+            reporter,
+            continue_on_error=ctx["continue_on_error"],
+        )
+
+        status = _finalize_status(previews, failed, len(clips))
+        result = _job_result(
+            "preview",
+            source,
+            ctx["output_dir"],
+            [],
+            failed,
+            skipped,
+            warnings,
+            len(clips),
+            previews=previews,
+        )
+        result["status"] = status
+        _emit_job(result, args, job)
+        return _job_exit_code(status, previews, failed)
+    finally:
+        job.cleanup()
+
+
 def _empty_job_result(
     command: str,
     source: SourceInfo,
@@ -991,10 +1512,17 @@ def _empty_job_result(
         "source": source.to_public(),
         "outputDirectory": _display_path(output_dir),
         "created": [],
+        "previews": [],
         "failed": [],
         "skipped": skipped,
         "warnings": warnings,
-        "summary": {"requested": len(skipped), "created": 0, "failed": 0, "skipped": len(skipped)},
+        "summary": {
+            "requested": len(skipped),
+            "created": 0,
+            "failed": 0,
+            "skipped": len(skipped),
+            "previews": 0,
+        },
     }
 
 
@@ -1018,7 +1546,11 @@ def _job_result(
     skipped: list[dict[str, Any]],
     warnings: list[str],
     requested: int,
+    previews: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    # The previews array is always present: empty for create and batch, populated
+    # for preview. A preview is never counted in summary.created (section 13.4).
+    previews = previews or []
     result = {
         "schemaVersion": SCHEMA_VERSION,
         "command": command,
@@ -1026,6 +1558,7 @@ def _job_result(
         "source": source.to_public(),
         "outputDirectory": _display_path(output_dir),
         "created": created,
+        "previews": previews,
         "failed": failed,
         "skipped": skipped,
         "warnings": warnings,
@@ -1034,6 +1567,7 @@ def _job_result(
             "created": len(created),
             "failed": len(failed),
             "skipped": len(skipped),
+            "previews": len(previews),
         },
     }
     # A wholly failed job (nothing created) also surfaces a top-level structured
@@ -1098,6 +1632,7 @@ def _cmd_validate_config(args: argparse.Namespace) -> int:
             "allowOutsideProject": cfg.allow_outside_project,
             "remoteSources": cfg.remote_sources,
             "keepRemoteSource": cfg.keep_remote_source,
+            "transformations": cfg.transformations_public(),
             "limits": {
                 "maxClipProcessingSeconds": cfg.max_clip_processing_seconds,
                 "maxTemporaryBytes": cfg.max_temporary_bytes,
@@ -1140,6 +1675,7 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "inspect": _cmd_inspect,
     "create": _cmd_create,
     "batch": _cmd_batch,
+    "preview": _cmd_preview,
     "validate-config": _cmd_validate_config,
     "validate-manifest": _cmd_validate_manifest,
 }
@@ -1181,8 +1717,12 @@ def _cancelled_result(
 
 
 def main(argv: list[str] | None = None) -> int:
+    # First statement in the engine: every later write to stdout/stderr -- the
+    # final JSON document, the JSON Lines progress stream, argparse usage errors,
+    # human-readable output -- depends on this (spec section 13.5).
+    configure_output_encoding()
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(normalize_argv(list(sys.argv[1:] if argv is None else argv)))
     _install_signal_handlers()
     _CANCEL_EVENT.clear()
 

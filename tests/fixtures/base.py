@@ -260,6 +260,11 @@ class EngineTestCase(unittest.TestCase):
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
+            # The engine pins its own streams to UTF-8 (spec §13.5); the harness
+            # MUST decode them the same way rather than by the runner's locale,
+            # or a Windows CI leg would mangle the very output it is asserting on.
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             env=env,
         )
@@ -296,6 +301,8 @@ class EngineTestCase(unittest.TestCase):
             "stdout": subprocess.PIPE,
             "stderr": subprocess.PIPE,
             "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
         }
         if sys.platform == "win32":
             # Own process group so CTRL_BREAK_EVENT reaches only the engine.
@@ -371,6 +378,8 @@ class EngineTestCase(unittest.TestCase):
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
         )
         data = json.loads(proc.stdout)

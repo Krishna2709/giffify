@@ -11,9 +11,10 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any
 
-from . import errors, models
+from . import errors, models, transforms
 
 CONFIG_FILENAME = ".video-to-gif.json"
 
@@ -29,8 +30,12 @@ _KNOWN_FIELDS = {
     "allowOutsideProject",
     "remoteSources",
     "keepRemoteSource",
+    "transformations",
     "limits",
 }
+# Global transformation defaults (spec section 9.6). A crop rectangle is only
+# meaningful against a specific source's dimensions, so it MUST NOT appear here.
+_KNOWN_TRANSFORM_FIELDS = {"width", "height", "speed", "dither", "bayerScale"}
 _KNOWN_LIMIT_FIELDS = {
     "maxClipProcessingSeconds",
     "maxTemporaryBytes",
@@ -82,8 +87,37 @@ class Config:
     max_temporary_bytes: int = DEFAULT_MAX_TEMP_BYTES
     max_download_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES
     max_download_seconds: int = DEFAULT_MAX_DOWNLOAD_SECONDS
+    # Global transformation defaults (section 9.6). ``None`` at every field means
+    # "not configured", so the built-in default applies (FR-024).
+    transform_width: int | None = None
+    transform_height: int | None = None
+    transform_speed: Decimal | None = None
+    transform_dither: str | None = None
+    transform_bayer_scale: int | None = None
     source_path: str | None = None  # where the config was loaded from
     warnings: list[str] = field(default_factory=list)
+
+    @property
+    def transform_spec(self) -> transforms.TransformSpec:
+        """The configuration precedence level for transformations (FR-024)."""
+        return transforms.TransformSpec(
+            crop=None,  # never configurable (section 9.6)
+            width=self.transform_width,
+            height=self.transform_height,
+            speed=self.transform_speed,
+            dither=self.transform_dither,
+            bayer_scale=self.transform_bayer_scale,
+        )
+
+    def transformations_public(self) -> dict[str, Any]:
+        """Serialize the resolved transformation defaults for validate-config."""
+        return {
+            "width": self.transform_width,
+            "height": self.transform_height,
+            "speed": None if self.transform_speed is None else float(self.transform_speed),
+            "dither": self.transform_dither,
+            "bayerScale": self.transform_bayer_scale,
+        }
 
 
 def _config_error(message: str, field_path: str) -> errors.EngineError:
@@ -177,6 +211,9 @@ def validate_config_dict(data: Any, *, source_path: str | None = None) -> Config
             )
         cfg.remote_sources = rs
 
+    if "transformations" in data:
+        _apply_transformations(cfg, data["transformations"], warnings)
+
     if "limits" in data:
         limits = data["limits"]
         if not isinstance(limits, dict):
@@ -224,6 +261,51 @@ def validate_config_dict(data: Any, *, source_path: str | None = None) -> Config
 
     cfg.warnings = warnings
     return cfg
+
+
+def _apply_transformations(cfg: Config, raw: Any, warnings: list[str]) -> None:
+    """Validate the ``transformations`` object (section 9.6, FR-026..FR-028).
+
+    Every source-independent check of FR-026 through FR-028 is applied here, so
+    ``validate-config`` rejects an out-of-range bound, an unknown dither mode, or
+    a Bayer scale outside 0..5 without touching a source. Source-dependent checks
+    (crop bounds, upscale evaluation) happen during preflight.
+    """
+    if not isinstance(raw, dict):
+        raise _config_error("transformations must be an object.", "transformations")
+
+    # A crop rectangle is only meaningful against a specific source (FR-025), so
+    # configuration MUST NOT define one; this is an error, not a warning.
+    if "crop" in raw:
+        raise _config_error(
+            "transformations.crop is not permitted in project configuration: a crop "
+            "rectangle is only meaningful against a specific source's dimensions. "
+            "Supply it per request (--crop) or per clip in a manifest.",
+            "transformations.crop",
+        )
+
+    for key in raw:
+        if key not in _KNOWN_TRANSFORM_FIELDS:
+            warnings.append(f"Unknown config field: transformations.{key}")
+
+    def parse(key: str, parser: Any) -> Any:
+        value = raw.get(key)
+        if key not in raw or value is None:
+            return None
+        try:
+            return parser(value, field_path=f"transformations.{key}")
+        except errors.EngineError as exc:
+            # Keep the transformation error code (FR-026..028) but report it as a
+            # configuration validation failure with the exact field path.
+            exc.stage = "config"
+            exc.field = f"transformations.{key}"
+            raise
+
+    cfg.transform_width = parse("width", transforms.parse_dimension)
+    cfg.transform_height = parse("height", transforms.parse_dimension)
+    cfg.transform_speed = parse("speed", transforms.parse_speed)
+    cfg.transform_dither = parse("dither", transforms.parse_dither)
+    cfg.transform_bayer_scale = parse("bayerScale", transforms.parse_bayer_scale)
 
 
 def load_config_file(path: str) -> Config:

@@ -193,5 +193,110 @@ class TestCSVManifest(unittest.TestCase):
             parse_csv_manifest("start,end\n")
 
 
+class TestManifestCellWhitespace(unittest.TestCase):
+    """Padding around a manifest cell is a formatting artifact, not a value.
+
+    Version 0.2.0 parsed ``width`` with ``int(str(value).strip())``, so a
+    spreadsheet export carrying ``" 480"`` worked. Every other CSV column
+    (start/end/duration/profile/fps/colors/loop) still tolerates padding, so
+    the 0.3.0 transformation columns must too, or one stray space fails a whole
+    batch with INVALID_DIMENSIONS. The trim happens before the grammar runs and
+    opens no injection surface: the strict FR-025..FR-028 grammars still reject
+    every hostile form (SEC-018), which the second half of this class proves.
+    """
+
+    def csv_clip(self, column, cell):
+        return parse_csv_manifest(f"start,end,{column}\n0,1,{cell}\n").clips[0]
+
+    def test_csv_padded_width_accepted(self):
+        for cell in (" 480", "480 ", "  480  ", "\t480\t"):
+            with self.subTest(cell=cell):
+                self.assertEqual(self.csv_clip("width", cell).width, 480)
+
+    def test_csv_padded_height_accepted(self):
+        self.assertEqual(self.csv_clip("height", " 360 ").height, 360)
+
+    def test_csv_padded_speed_accepted(self):
+        self.assertEqual(float(self.csv_clip("speed", " 2.0 ").speed), 2.0)
+
+    def test_csv_padded_crop_accepted(self):
+        crop = self.csv_clip("crop", " 0:0:100:100 ").crop
+        self.assertEqual((crop.x, crop.y, crop.width, crop.height), (0, 0, 100, 100))
+
+    def test_csv_padded_dither_accepted(self):
+        self.assertEqual(self.csv_clip("dither", " sierra2_4a ").dither, "sierra2_4a")
+
+    def test_csv_padded_bayer_scale_accepted(self):
+        clip = parse_csv_manifest("start,end,dither,bayerscale\n0,1,bayer, 3 \n").clips[0]
+        self.assertEqual((clip.dither, clip.bayer_scale), ("bayer", 3))
+
+    def test_csv_padding_matches_the_legacy_columns(self):
+        # The point of the fix: transformation columns behave like the columns
+        # that have always tolerated padding.
+        m = parse_csv_manifest(
+            "start,end,profile,fps,colors,width,height\n 0 , 1 , small , 10 , 64 , 480 , 240 \n"
+        )
+        clip = m.clips[0]
+        self.assertEqual(
+            (clip.start_ms, clip.end_ms, clip.profile, clip.fps, clip.colors),
+            (0, 1000, "small", 10, 64),
+        )
+        self.assertEqual((clip.width, clip.height), (480, 240))
+
+    def test_csv_inner_whitespace_still_rejected(self):
+        for column, cell in (
+            ("width", "4 80"),
+            ("height", "3 60"),
+            ("crop", "0:0:100 :100"),
+            ("crop", "0:0:100: 100"),
+            ("speed", "2. 0"),
+            ("dither", "sierra2 _4a"),
+        ):
+            with self.subTest(column=column, cell=cell), self.assertRaises(errors.EngineError):
+                self.csv_clip(column, cell)
+
+    def test_csv_inner_newline_still_rejected(self):
+        # A quoted cell can carry a real newline; trimming must not reach it.
+        for column, cell in (("width", '"48\n0"'), ("crop", '"0:0:100\n:100"')):
+            with self.subTest(column=column), self.assertRaises(errors.EngineError):
+                self.csv_clip(column, cell)
+
+    def test_csv_trimming_does_not_admit_filter_syntax(self):
+        for column, cell in (
+            ("width", " 480,scale=1:1 "),
+            ("crop", " 0:0:10:10[a];[a]drawtext=x "),
+            ("dither", " bayer'; touch /tmp/pwned; ' "),
+            ("speed", " 2.0;drawbox "),
+        ):
+            with self.subTest(column=column, cell=cell), self.assertRaises(errors.EngineError):
+                self.csv_clip(column, f'"{cell}"')
+
+    def test_json_padded_width_accepted_as_in_v0_2_0(self):
+        # Executed against the released 0.2.0 engine: ``" 480"`` parsed to 480.
+        raw = '{"schemaVersion":1,"input":"a.mp4","clips":[{"start":"0","end":"1","width":" 480"}]}'
+        self.assertEqual(parse_json_manifest(raw).clips[0].width, 480)
+
+    def test_json_stays_strict_for_fields_new_in_0_3_0(self):
+        # No 0.2.0 leniency to preserve for height/crop/speed/dither, so JSON
+        # keeps the strict grammar rather than loosening past what 0.2.0 did.
+        for field, value in (
+            ("height", " 360"),
+            ("crop", " 0:0:10:10"),
+            ("speed", " 2.0"),
+        ):
+            raw = (
+                '{"schemaVersion":1,"input":"a.mp4",'
+                f'"clips":[{{"start":"0","end":"1","{field}":"{value}"}}]}}'
+            )
+            with self.subTest(field=field), self.assertRaises(errors.EngineError):
+                parse_json_manifest(raw)
+
+    def test_json_inner_whitespace_in_width_still_rejected(self):
+        raw = '{"schemaVersion":1,"input":"a.mp4","clips":[{"start":"0","end":"1","width":"4 80"}]}'
+        with self.assertRaises(errors.EngineError) as ctx:
+            parse_json_manifest(raw)
+        self.assertEqual(ctx.exception.code, errors.INVALID_DIMENSIONS)
+
+
 if __name__ == "__main__":
     unittest.main()

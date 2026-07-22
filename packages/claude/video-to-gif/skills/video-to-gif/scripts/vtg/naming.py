@@ -66,12 +66,14 @@ def sanitize_stem(stem: str) -> str:
     return stem
 
 
-def sanitize_output_name(name: str) -> str:
+def sanitize_output_name(name: str, *, ext: str = ".gif") -> str:
     """Sanitize a user-supplied bare output filename (FR-011).
 
     The input MUST be a bare filename; path separators are rejected up front by
     the CLI/manifest layers, but we defensively strip them here too. Always
-    returns a name ending in ``.gif`` within the safe length cap.
+    returns a name ending in ``ext`` within the safe length cap. ``ext`` is
+    ``.png`` for preview frames, where every FR-011 rule applies unchanged with
+    ``.png`` substituted for ``.gif`` (FR-029).
     """
     if name is None:
         raise errors.EngineError(
@@ -101,12 +103,45 @@ def sanitize_output_name(name: str) -> str:
             status=errors.STATUS_VALIDATION_FAILED,
             field="output-name",
         )
-    # Split off a .gif extension if present (case-insensitive); we always end .gif.
+    # Split off the target extension if present (case-insensitive); we always
+    # end with it.
     stem = base
-    if stem.lower().endswith(".gif"):
-        stem = stem[:-4]
+    if stem.lower().endswith(ext.lower()):
+        stem = stem[: -len(ext)]
     stem = sanitize_stem(stem)
-    return _cap_length(stem, suffix=None) + ".gif"
+    return _cap_length(stem, suffix=None, ext=ext) + ext
+
+
+def sanitize_preview_name(name: str) -> str:
+    """Sanitize a user-supplied preview filename, enforcing ``.png`` (FR-029).
+
+    A name with no extension gains ``.png``; a name with any other extension is
+    rejected with INVALID_USAGE and exit code 2.
+    """
+    if not isinstance(name, str) or name.strip() == "":
+        raise errors.EngineError(
+            errors.INVALID_USAGE,
+            "Preview output name must not be empty.",
+            exit_code=errors.EXIT_INVALID_USAGE,
+            status=errors.STATUS_VALIDATION_FAILED,
+            field="output-name",
+        )
+    base = name.strip()
+    # Only inspect the extension here; sanitize_output_name performs the
+    # separator, traversal, reserved-name, and length checks of FR-011.
+    dot = base.rfind(".")
+    if dot > 0:
+        suffix = base[dot:]
+        if suffix.lower() != ".png":
+            raise errors.EngineError(
+                errors.INVALID_USAGE,
+                f"A preview output name must end in .png, got {name!r}.",
+                exit_code=errors.EXIT_INVALID_USAGE,
+                status=errors.STATUS_VALIDATION_FAILED,
+                field="output-name",
+                remediation="Use a .png filename, or omit the extension entirely.",
+            )
+    return sanitize_output_name(base, ext=".png")
 
 
 def default_output_name(video_stem: str, start_ms: int, end_ms: int) -> str:
@@ -119,9 +154,21 @@ def default_output_name(video_stem: str, start_ms: int, end_ms: int) -> str:
     return f"{stem}{suffix}.gif"
 
 
-def _cap_length(stem: str, suffix: str | None) -> str:
-    """Cap total filename length, preserving the timestamp suffix and .gif."""
-    ext = ".gif"
+def default_preview_name(stem_source: str, at_ms: int) -> str:
+    """Build the default preview name ``<stem>_<at>.png`` (FR-029).
+
+    ``stem_source`` is the video stem for the single-frame form, or the clip
+    name for the manifest form, where a named clip yields
+    ``<clip-name>_<start>.png``.
+    """
+    stem = sanitize_stem(stem_source)
+    suffix = f"_{format_filename_stamp(at_ms)}"
+    stem = _cap_length(stem, suffix=suffix, ext=".png")
+    return f"{stem}{suffix}.png"
+
+
+def _cap_length(stem: str, suffix: str | None, ext: str = ".gif") -> str:
+    """Cap total filename length, preserving the timestamp suffix and extension."""
     reserved = len(ext) + (len(suffix) if suffix else 0)
     budget = MAX_FILENAME_LENGTH - reserved
     if budget < 1:
@@ -141,8 +188,9 @@ def unique_name(name: str, exists: Callable[[str], bool]) -> str:
     """
     if not exists(name):
         return name
-    if name.lower().endswith(".gif"):
-        stem, ext = name[:-4], name[-4:]
+    dot = name.rfind(".")
+    if dot > 0:
+        stem, ext = name[:dot], name[dot:]
     else:
         stem, ext = name, ""
     counter = 1

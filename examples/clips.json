@@ -5,22 +5,31 @@
   "profile": "balanced",
   "loop": "forever",
   "continueOnError": true,
+  "width": 800,
+  "dither": "sierra2_4a",
   "clips": [
     {
       "name": "opening",
       "start": "00:01:00",
-      "end": "00:01:05"
+      "end": "00:01:05",
+      "crop": { "x": 320, "y": 180, "width": 1280, "height": 720 }
     },
     {
       "name": "reaction",
       "start": "00:03:20",
-      "duration": 7
+      "duration": 7,
+      "crop": "0:0:1920:800",
+      "speed": 2.0,
+      "dither": "bayer",
+      "bayerScale": 5
     },
     {
       "name": "ui-detail",
       "start": "00:05:10",
       "duration": "00:00:04",
-      "profile": "high"
+      "profile": "high",
+      "width": 960,
+      "height": 540
     }
   ]
 }

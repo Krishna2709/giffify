@@ -11,10 +11,14 @@ import io
 import json
 import os
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any
 
-from . import errors, models
+from . import errors, models, transforms
 from .timestamps import parse_duration, parse_timestamp
+
+# Transformation fields, shared by the top level and the clip level (10.4).
+_TRANSFORM_FIELDS = {"crop", "height", "speed", "dither", "bayerScale"}
 
 # JSON manifest fields (section 10).
 _JSON_TOP_KNOWN = {
@@ -30,6 +34,7 @@ _JSON_TOP_KNOWN = {
     "colors",
     "allowUpscale",
     "clips",
+    *_TRANSFORM_FIELDS,
 }
 _JSON_CLIP_KNOWN = {
     "name",
@@ -41,11 +46,34 @@ _JSON_CLIP_KNOWN = {
     "fps",
     "colors",
     "loop",
+    *_TRANSFORM_FIELDS,
 }
 
-# CSV columns (section 11).
+# CSV columns (section 11). Header names are lowercased before comparison, so
+# the bayerScale column appears here as "bayerscale".
 _CSV_REQUIRED = {"start"}
-_CSV_KNOWN = {"start", "end", "duration", "name", "profile", "width", "fps", "colors", "loop"}
+_CSV_KNOWN = {
+    "start",
+    "end",
+    "duration",
+    "name",
+    "profile",
+    "width",
+    "fps",
+    "colors",
+    "loop",
+    "crop",
+    "height",
+    "speed",
+    "dither",
+    "bayerscale",
+}
+
+# Transformation fields that already existed in version 0.2.0 and were parsed
+# there with ``int(str(value).strip())``. A whitespace-padded JSON string was
+# therefore valid, and must stay valid (NFR-006). Fields new in 0.3.0 are not
+# listed: they have no legacy leniency to preserve.
+_LEGACY_LENIENT_FIELDS = frozenset({"width"})
 
 
 @dataclass
@@ -61,8 +89,26 @@ class Manifest:
     fps: int | None = None
     colors: int | None = None
     allow_upscale: bool | None = None
+    # v0.3.0 top-level transformation fields (section 10.4).
+    crop: transforms.CropRect | None = None
+    height: int | None = None
+    speed: Decimal | None = None
+    dither: str | None = None
+    bayer_scale: int | None = None
     schema_version: int = 1
     warnings: list[str] = field(default_factory=list)
+
+    @property
+    def transform_spec(self) -> transforms.TransformSpec:
+        """The top-level manifest precedence level for transformations (FR-024)."""
+        return transforms.TransformSpec(
+            crop=self.crop,
+            width=self.width,
+            height=self.height,
+            speed=self.speed,
+            dither=self.dither,
+            bayer_scale=self.bayer_scale,
+        )
 
 
 def _manifest_error(
@@ -110,6 +156,11 @@ def _clip_from_fields(
     colors: Any,
     loop: Any,
     field_prefix: str,
+    crop: Any = None,
+    height: Any = None,
+    speed: Any = None,
+    dither: Any = None,
+    bayer_scale: Any = None,
 ) -> models.ClipSpec:
     if start is None or (isinstance(start, str) and start.strip() == ""):
         raise _manifest_error(
@@ -189,7 +240,18 @@ def _clip_from_fields(
             exc.clip_index = index
             raise
 
-    clip_width = _positive_int(width, f"{field_prefix}.width", index) if _present(width) else None
+    tx = _parse_transform_fields(
+        {
+            "crop": crop,
+            "width": width,
+            "height": height,
+            "speed": speed,
+            "dither": dither,
+            "bayerScale": bayer_scale,
+        },
+        field_prefix=field_prefix,
+        clip_index=index,
+    )
     clip_fps = _positive_int(fps, f"{field_prefix}.fps", index) if _present(fps) else None
     clip_colors = (
         _positive_int(colors, f"{field_prefix}.colors", index) if _present(colors) else None
@@ -205,15 +267,63 @@ def _clip_from_fields(
         end_ms=resolved_end,
         name=clip_name,
         profile=clip_profile,
-        width=clip_width,
+        width=tx.width,
         fps=clip_fps,
         colors=clip_colors,
         loop=clip_loop,
+        crop=tx.crop,
+        height=tx.height,
+        speed=tx.speed,
+        dither=tx.dither,
+        bayer_scale=tx.bayer_scale,
     )
 
 
 def _present(value: Any) -> bool:
     return value is not None and not (isinstance(value, str) and value.strip() == "")
+
+
+def _parse_transform_fields(
+    values: dict[str, Any],
+    *,
+    field_prefix: str,
+    clip_index: int | None,
+) -> transforms.TransformSpec:
+    """Parse the section 10.4 transformation fields from a manifest level.
+
+    ``values`` maps the public field names (``crop``, ``width``, ``height``,
+    ``speed``, ``dither``, ``bayerScale``) to raw values. An absent or empty
+    value means "not specified at this level", so the next precedence level
+    applies (FR-024). Invalid values raise the FR-025..FR-028 error codes with
+    exit code 6.
+
+    Surrounding whitespace is stripped from ``width`` and ``height`` strings
+    before the grammar runs: version 0.2.0 parsed both with
+    ``int(str(value).strip())``, so a padded value such as ``" 480"`` was
+    accepted, and rejecting it now would break existing manifests (NFR-006).
+    Only the padding is forgiven -- the strict grammar of FR-026 still runs on
+    the trimmed text, so inner whitespace and every non-digit character are
+    still rejected. Fields introduced in 0.3.0 have no such legacy and stay
+    strict in JSON; CSV cells are trimmed for every column by the CSV reader.
+    """
+
+    def parse(key: str, parser: Any) -> Any:
+        raw = values.get(key)
+        if not _present(raw):
+            return None
+        if key in _LEGACY_LENIENT_FIELDS and isinstance(raw, str):
+            raw = raw.strip()
+        path = f"{field_prefix}.{key}" if field_prefix else key
+        return parser(raw, field_path=path, clip_index=clip_index)
+
+    return transforms.TransformSpec(
+        crop=parse("crop", transforms.parse_crop),
+        width=parse("width", transforms.parse_dimension),
+        height=parse("height", transforms.parse_dimension),
+        speed=parse("speed", transforms.parse_speed),
+        dither=parse("dither", transforms.parse_dither),
+        bayer_scale=parse("bayerScale", transforms.parse_bayer_scale),
+    )
 
 
 def parse_json_manifest(raw: str, *, source_path: str | None = None) -> Manifest:
@@ -254,7 +364,7 @@ def parse_json_manifest(raw: str, *, source_path: str | None = None) -> Manifest
     top_collision = _opt_collision(data.get("collisionPolicy"), "collisionPolicy")
     top_continue = _opt_bool(data.get("continueOnError"), "continueOnError")
     top_allow_upscale = _opt_bool(data.get("allowUpscale"), "allowUpscale")
-    top_width = _positive_int(data["width"], "width", None) if _present(data.get("width")) else None
+    top_tx = _parse_transform_fields(data, field_prefix="", clip_index=None)
     top_fps = _positive_int(data["fps"], "fps", None) if _present(data.get("fps")) else None
     top_colors = (
         _positive_int(data["colors"], "colors", None) if _present(data.get("colors")) else None
@@ -283,6 +393,11 @@ def parse_json_manifest(raw: str, *, source_path: str | None = None) -> Manifest
                 colors=clip.get("colors"),
                 loop=clip.get("loop"),
                 field_prefix=f"clips[{i}]",
+                crop=clip.get("crop"),
+                height=clip.get("height"),
+                speed=clip.get("speed"),
+                dither=clip.get("dither"),
+                bayer_scale=clip.get("bayerScale"),
             )
         )
 
@@ -294,10 +409,15 @@ def parse_json_manifest(raw: str, *, source_path: str | None = None) -> Manifest
         loop=top_loop,
         continue_on_error=top_continue,
         collision_policy=top_collision,
-        width=top_width,
+        width=top_tx.width,
         fps=top_fps,
         colors=top_colors,
         allow_upscale=top_allow_upscale,
+        crop=top_tx.crop,
+        height=top_tx.height,
+        speed=top_tx.speed,
+        dither=top_tx.dither,
+        bayer_scale=top_tx.bayer_scale,
         schema_version=sv,
         warnings=warnings,
     )
@@ -324,12 +444,23 @@ def parse_csv_manifest(raw: str) -> Manifest:
         raise _manifest_error("CSV manifest must include an 'end' or 'duration' column.", "$")
 
     def get(row: list[str], col: str) -> str | None:
+        """Return a cell's text with surrounding whitespace stripped.
+
+        Trimming happens for every column uniformly, before any grammar runs.
+        start/end/duration/profile/fps/colors/loop have always tolerated a
+        padded cell (``str(value).strip()`` downstream), and the transformation
+        columns must behave the same way -- a leading space in a spreadsheet
+        export is a formatting artifact, not a value. This opens no injection
+        surface: the strict FR-025..FR-028 grammars still run on the trimmed
+        text, so inner whitespace, newlines, and every character outside each
+        grammar remain rejected (SEC-018).
+        """
         if col not in header:
             return None
         idx = header.index(col)
         if idx >= len(row):
             return None
-        return row[idx]
+        return row[idx].strip()
 
     clips: list[models.ClipSpec] = []
     clip_index = 0
@@ -350,6 +481,11 @@ def parse_csv_manifest(raw: str) -> Manifest:
                 colors=get(row, "colors"),
                 loop=get(row, "loop"),
                 field_prefix=f"row {line_no}",
+                crop=get(row, "crop"),
+                height=get(row, "height"),
+                speed=get(row, "speed"),
+                dither=get(row, "dither"),
+                bayer_scale=get(row, "bayerscale"),
             )
         )
         clip_index += 1
