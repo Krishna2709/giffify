@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from fractions import Fraction
 from typing import Any
 
 from . import errors
@@ -174,16 +173,31 @@ def _reject_reference_container(format_name: str) -> None:
         _raise_reference_container(", ".join(sorted(hostile)))
 
 
+def _parse_rate(text: str) -> float:
+    """Parse one ffprobe frame-rate field, which is ``"N/D"`` or a bare number.
+
+    Hand-rolled instead of ``fractions.Fraction`` so the module does not import
+    ``fractions`` (~1.1ms on every command) for a single division. A zero
+    denominator ("N/0") still raises ZeroDivisionError and a non-numeric field
+    still raises ValueError, which is what the caller filters on so FR-014's fps
+    ceiling degrades to 0.0 rather than escaping as an internal error.
+    """
+    numerator, separator, denominator = text.partition("/")
+    if separator:
+        return float(numerator) / float(denominator)
+    return float(numerator)
+
+
 def _parse_fps(stream: dict[str, Any]) -> float:
     for key in ("avg_frame_rate", "r_frame_rate"):
         val = stream.get(key)
         if val and val not in ("0/0", "N/A"):
             try:
-                frac = Fraction(val)
-                if frac > 0:
-                    return float(frac)
+                rate = _parse_rate(str(val))
             except (ValueError, ZeroDivisionError):
                 continue
+            if rate > 0:
+                return rate
     return 0.0
 
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from typing import Any, TextIO
 
 
@@ -20,6 +21,11 @@ class ProgressReporter:
     def __init__(self, enabled: bool = True, stream: TextIO | None = None) -> None:
         self.enabled = enabled
         self._stream = stream if stream is not None else sys.stderr
+        # A batch may encode several clips concurrently, so more than one thread
+        # can emit at once. TextIO offers no interleaving guarantee across the
+        # encode-then-write steps; the lock keeps every event a whole line so the
+        # JSON Lines stream stays parseable (section 13.3).
+        self._lock = threading.Lock()
 
     def emit(self, event: str, **fields: Any) -> None:
         if not self.enabled:
@@ -33,8 +39,10 @@ class ProgressReporter:
             # under the host locale. UnicodeEncodeError is caught alongside the
             # closed-stream cases as a last resort -- a progress event MUST NEVER
             # be able to take down a run that is otherwise succeeding.
-            self._stream.write(json.dumps(payload, ensure_ascii=True) + "\n")
-            self._stream.flush()
+            line = json.dumps(payload, ensure_ascii=True) + "\n"
+            with self._lock:
+                self._stream.write(line)
+                self._stream.flush()
         except (OSError, ValueError):  # pragma: no cover - stderr closed/unencodable
             pass
 

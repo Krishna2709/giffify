@@ -27,7 +27,21 @@ from .timestamps import format_hhmmss, seconds_str
 from .transforms import CropRect
 
 _GRACE_SECONDS = 5.0
-_POLL_INTERVAL = 0.2
+# Guard-loop cadence for run_guarded. The loop used to sleep a flat 0.2s between
+# polls, so a pass that really took 30ms still cost ~200ms of wall clock waiting
+# on an already-dead process. It now waits ON the process with a timeout, which
+# wakes as soon as ffmpeg exits, and the timeout slice grows from
+# _POLL_MIN_INTERVAL to _POLL_INTERVAL so a long encode does not spin. The
+# ceiling is the upper bound on how late cancellation and the SEC-011 limits can
+# be observed; keeping it well under the previous 0.2s means both guarantees get
+# strictly more prompt, never less.
+_POLL_MIN_INTERVAL = 0.002
+_POLL_INTERVAL = 0.05
+# The temp-disk ceiling is a threshold check, not a real-time bound, so it runs
+# on its own fixed cadence (the loop's historical interval) rather than on every
+# slice: walking the temp tree hundreds of times a second would burn CPU without
+# tightening the ceiling.
+_DISK_CHECK_INTERVAL = 0.2
 
 # Temp-artifact deletion (bounded retry to absorb Windows handle-release lag)
 # lives in vtg.cleanup so vtg.remote can share the exact same implementation for
@@ -317,6 +331,54 @@ def _terminate_group(proc: subprocess.Popen) -> None:
         proc.wait(timeout=_GRACE_SECONDS)
 
 
+class TempBudget:
+    """Job-wide accounting of live temporary artifacts (SEC-011).
+
+    SEC-011 sets the wall-clock timeout *per clip* but the temporary-disk
+    ceiling *per job* -- the two scopes are deliberately different. While clips
+    were encoded strictly one at a time the distinction was invisible: exactly
+    one clip's temp artifacts existed at any instant, so measuring that clip's
+    ``temp_paths`` WAS measuring the job. Now that a batch can encode several
+    clips concurrently, each live clip registers its artifacts here and every
+    guard loop measures the sum over the whole registry, so N workers cannot
+    quietly commit N x ``limits.maxTemporaryBytes``.
+
+    Registration is lock-guarded because workers register, release and snapshot
+    from different threads. ``paths`` returns a plain list copy so the walk in
+    ``_dir_size`` never runs while the lock is held.
+    """
+
+    __slots__ = ("_live", "_lock", "_next_token")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._live: dict[int, tuple[str, ...]] = {}
+        self._next_token = 0
+
+    def register(self, paths: list[str]) -> int:
+        """Record one clip's temp artifacts; returns the release token."""
+        with self._lock:
+            token = self._next_token
+            self._next_token += 1
+            self._live[token] = tuple(paths)
+            return token
+
+    def release(self, token: int) -> None:
+        """Drop a clip's artifacts from the job total (idempotent).
+
+        Callers MUST release only after the artifacts are gone from disk (or
+        moved to their destination), so the job total never under-counts bytes
+        that still exist.
+        """
+        with self._lock:
+            self._live.pop(token, None)
+
+    def paths(self) -> list[str]:
+        """Snapshot of every live temporary path across the whole job."""
+        with self._lock:
+            return [path for paths in self._live.values() for path in paths]
+
+
 def _dir_size(paths: list[str]) -> int:
     total = 0
     for p in paths:
@@ -348,11 +410,19 @@ def run_guarded(
     temp_paths: list[str],
     max_temp_bytes: int,
     cancel_event: threading.Event | None,
+    temp_budget: TempBudget | None = None,
 ) -> None:
     """Run an FFmpeg command with timeout, temp ceiling, and cancellation.
 
     Raises CancelledError on cancel, RESOURCE_LIMIT_EXCEEDED on timeout/disk
     breach, or FFMPEG_FAILED on a non-zero exit.
+
+    ``temp_paths`` is this command's own temporary footprint. When a
+    ``temp_budget`` is supplied it is authoritative instead: SEC-011's ceiling
+    is per job, so the measurement covers every clip live anywhere in the job,
+    not just this one. Callers without a budget (single-shot pipelines, direct
+    unit/security-test calls) keep the historical own-paths behaviour, which for
+    one clip is the same number.
     """
     start = time.monotonic()
     try:
@@ -368,20 +438,35 @@ def run_guarded(
         ) from exc
 
     breach: str | None = None
+    deadline = start + timeout_seconds
+    interval = _POLL_MIN_INTERVAL
+    next_disk_check = start  # first pass through the loop always checks
     while True:
-        if proc.poll() is not None:
+        try:
+            # Wait on the child rather than sleeping a fixed quantum: this returns
+            # the moment ffmpeg exits, while the timeout keeps every guard below on
+            # a bounded cadence (SEC-011 and section 16 ride on this loop, so the
+            # wait must never be unbounded).
+            proc.wait(timeout=interval)
             break
+        except subprocess.TimeoutExpired:
+            pass
         if cancel_event is not None and cancel_event.is_set():
             breach = "cancelled"
             break
-        elapsed = time.monotonic() - start
-        if elapsed > timeout_seconds:
+        now = time.monotonic()
+        if now > deadline:
             breach = "timeout"
             break
-        if _dir_size(temp_paths) > max_temp_bytes:
-            breach = "disk"
-            break
-        time.sleep(_POLL_INTERVAL)
+        if now >= next_disk_check:
+            # Per JOB, not per clip: with a budget in play this sums every live
+            # clip's artifacts, so concurrent workers share one ceiling.
+            measured = temp_budget.paths() if temp_budget is not None else temp_paths
+            if _dir_size(measured) > max_temp_bytes:
+                breach = "disk"
+                break
+            next_disk_check = now + _DISK_CHECK_INTERVAL
+        interval = min(interval * 2, _POLL_INTERVAL)
 
     if breach is not None:
         try:
@@ -400,8 +485,8 @@ def run_guarded(
                 )
             raise errors.EngineError(
                 errors.RESOURCE_LIMIT_EXCEEDED,
-                f"Clip exceeded the temporary-disk ceiling ({max_temp_bytes} bytes) "
-                "and was terminated.",
+                f"Temporary-disk ceiling ({max_temp_bytes} bytes) exceeded; "
+                "the clip was terminated.",
                 exit_code=errors.EXIT_RESOURCE_LIMIT,
                 status=errors.STATUS_FAILED,
                 stage=stage,
@@ -491,8 +576,15 @@ def convert_clip(
     clip_index: int = 0,
     cancel_event: threading.Event | None = None,
     reporter: ProgressReporter = NULL_REPORTER,
+    temp_budget: TempBudget | None = None,
 ) -> ConversionResult:
-    """Run the full two-pass conversion for one clip (section 15.2/15.3)."""
+    """Run the full two-pass conversion for one clip (section 15.2/15.3).
+
+    ``temp_budget`` is the job-wide SEC-011 temp-disk registry. When clips are
+    encoded concurrently the caller MUST pass the same budget to every clip, so
+    the ceiling stays a per-job ceiling rather than one full-size budget per
+    worker. It is optional so single-clip callers keep working unchanged.
+    """
     temp_dir = tempfile.mkdtemp(prefix="vtg-")
     palette_path = os.path.join(temp_dir, "palette.png")
     # Temp GIF lives in the output directory to guarantee same-filesystem
@@ -501,6 +593,10 @@ def convert_clip(
     os.close(fd)
 
     temp_paths = [temp_dir, temp_out]
+    # Registered before the first FFmpeg process starts and released only after
+    # the artifacts are off disk (moved or removed), so the job total can never
+    # miss bytes that exist.
+    budget_token = temp_budget.register(temp_paths) if temp_budget is not None else None
 
     def _cleanup() -> None:
         # Cleanup runs only after run_guarded has terminated AND waited for the
@@ -513,45 +609,55 @@ def convert_clip(
         _remove_paths([temp_out, temp_dir])
 
     try:
-        reporter.stage_progress(clip_index, "palette", 0.0)
-        run_guarded(
-            build_palettegen_command(
-                ffmpeg, source.path, start_ms, duration_ms, settings, palette_path
-            ),
-            stage="palette",
-            clip_index=clip_index,
-            timeout_seconds=timeout_seconds,
-            temp_paths=temp_paths,
-            max_temp_bytes=max_temp_bytes,
-            cancel_event=cancel_event,
-        )
-        reporter.stage_progress(clip_index, "palette", 100.0)
+        try:
+            reporter.stage_progress(clip_index, "palette", 0.0)
+            run_guarded(
+                build_palettegen_command(
+                    ffmpeg, source.path, start_ms, duration_ms, settings, palette_path
+                ),
+                stage="palette",
+                clip_index=clip_index,
+                timeout_seconds=timeout_seconds,
+                temp_paths=temp_paths,
+                max_temp_bytes=max_temp_bytes,
+                cancel_event=cancel_event,
+                temp_budget=temp_budget,
+            )
+            reporter.stage_progress(clip_index, "palette", 100.0)
 
-        reporter.stage_progress(clip_index, "encode", 0.0)
-        run_guarded(
-            build_paletteuse_command(
-                ffmpeg, source.path, start_ms, duration_ms, settings, palette_path, temp_out
-            ),
-            stage="encode",
-            clip_index=clip_index,
-            timeout_seconds=timeout_seconds,
-            temp_paths=temp_paths,
-            max_temp_bytes=max_temp_bytes,
-            cancel_event=cancel_event,
-        )
-        size = _verify_gif(temp_out)
-        reporter.stage_progress(clip_index, "encode", 100.0)
+            reporter.stage_progress(clip_index, "encode", 0.0)
+            run_guarded(
+                build_paletteuse_command(
+                    ffmpeg, source.path, start_ms, duration_ms, settings, palette_path, temp_out
+                ),
+                stage="encode",
+                clip_index=clip_index,
+                timeout_seconds=timeout_seconds,
+                temp_paths=temp_paths,
+                max_temp_bytes=max_temp_bytes,
+                cancel_event=cancel_event,
+                temp_budget=temp_budget,
+            )
+            size = _verify_gif(temp_out)
+            reporter.stage_progress(clip_index, "encode", 100.0)
 
-        # Atomic move to destination (same filesystem).
-        os.replace(temp_out, dest_path)
-    except BaseException:
-        _cleanup()
-        raise
-    else:
-        # Success: remove the palette temp dir (temp_out already moved into
-        # place). The same bounded retry keeps this robust on Windows.
-        if not keep_temporary_files:
-            _remove_paths([temp_dir])
+            # Atomic move to destination (same filesystem).
+            os.replace(temp_out, dest_path)
+        except BaseException:
+            _cleanup()
+            raise
+        else:
+            # Success: remove the palette temp dir (temp_out already moved into
+            # place). The same bounded retry keeps this robust on Windows.
+            if not keep_temporary_files:
+                _remove_paths([temp_dir])
+    finally:
+        # Released last, so the job total still includes this clip while its
+        # artifacts are being terminated and deleted. The registry therefore
+        # holds exactly the in-flight clips -- under the serial path that is one
+        # clip, i.e. byte-for-byte the accounting this had before concurrency.
+        if temp_budget is not None and budget_token is not None:
+            temp_budget.release(budget_token)
 
     return ConversionResult(
         path=dest_path,

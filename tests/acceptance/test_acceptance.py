@@ -402,13 +402,19 @@ class TestAcceptance(EngineTestCase):
     def test_ac_012_cancellation(self):
         """AC-012: Cancelling during conversion stops the active process, removes
         incomplete output, preserves completed output, and returns cancelled."""
+        # k0 is deliberately tiny and k1..k3 are long: a batch may encode
+        # independent clips concurrently, so "clip 0 completed" must not be taken
+        # to mean "clip 1 has not started yet". The short first clip guarantees a
+        # completed GIF exists while the rest are still mid-encode, whatever the
+        # worker count (including 1), which is the window this criterion needs.
         m = self._write_json(
             "cancel.json",
             {
                 "schemaVersion": 1,
                 "input": self.heavy_src,
                 "profile": "high",
-                "clips": [{"name": f"k{i}", "start": "0", "end": "3"} for i in range(4)],
+                "clips": [{"name": "k0", "start": "0", "end": "0.2"}]
+                + [{"name": f"k{i}", "start": "0", "end": "3"} for i in range(1, 4)],
             },
         )
 

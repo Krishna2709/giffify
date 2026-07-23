@@ -22,7 +22,7 @@ from vtg import (
     cli,
     errors,
 )
-from vtg.ffmpeg import ConversionResult
+from vtg.ffmpeg import ConversionResult, TempBudget
 
 
 class _Recorder:
@@ -264,6 +264,41 @@ class TestBatch(CLIBase):
         self.assertEqual(code, 0)
         self.assertEqual(result["summary"]["created"], 2)
 
+    def test_every_clip_shares_one_job_temp_budget(self):
+        # SEC-011 scopes the temporary-disk ceiling per JOB. Clips may now be
+        # encoded concurrently, so the ceiling only stays a job ceiling if every
+        # clip is measured against the same ffmpeg.TempBudget; one budget per
+        # clip would let the job commit workers x limits.maxTemporaryBytes.
+        m = self._write_manifest(
+            [{"name": name, "start": start, "end": start + 1} for start, name in enumerate("abcd")]
+        )
+        code, result = self.run_cli(["batch", "--manifest", m, "--json"])
+        self.assertEqual(code, 0)
+        self.assertEqual(result["summary"]["created"], 4)
+
+        budgets = [call["temp_budget"] for call in self.recorder.calls]
+        self.assertEqual(len(budgets), 4)
+        for budget in budgets:
+            self.assertIsInstance(budget, TempBudget)
+        self.assertEqual(len({id(budget) for budget in budgets}), 1)
+
+    def test_serial_stop_on_error_path_also_shares_the_budget(self):
+        # continueOnError=false keeps the serial loop; it must still hand clips
+        # the job-wide budget so the two paths account identically.
+        m = self._write_manifest(
+            [
+                {"name": "a", "start": "0", "end": "1"},
+                {"name": "b", "start": "2", "end": "3"},
+            ],
+            continueOnError=False,
+        )
+        code, _ = self.run_cli(["batch", "--manifest", m, "--json"])
+        self.assertEqual(code, 0)
+        budgets = [call["temp_budget"] for call in self.recorder.calls]
+        self.assertEqual(len(budgets), 2)
+        self.assertEqual(len({id(budget) for budget in budgets}), 1)
+        self.assertIsInstance(budgets[0], TempBudget)
+
     def test_dry_run(self):
         m = self._write_manifest([{"name": "a", "start": "0", "end": "1"}])
         code, result = self.run_cli(["batch", "--manifest", m, "--dry-run", "--json"])
@@ -434,6 +469,36 @@ class TestValidateCommands(CLIBase):
         code, result = self.run_cli(["validate-manifest", "--manifest", path, "--json"])
         self.assertEqual(code, 0)
         self.assertEqual(result["clipCount"], 1)
+
+
+class TestImportGraph(unittest.TestCase):
+    """Guards the deferred imports that keep every command's startup cheap.
+
+    vtg.remote (http.client -> ssl + the whole email package) is imported only
+    inside _acquire_remote, and concurrent.futures only on the parallel batch
+    path. Both are easy to re-import eagerly by accident, and neither failure is
+    visible in behaviour -- only in latency -- so it is asserted here. Run in a
+    subprocess because the rest of this suite has already imported them.
+    """
+
+    def _modules_after_importing_cli(self) -> set:
+        import subprocess
+
+        snippet = (
+            "import sys, json;"
+            f"sys.path.insert(0, {vtgtest._SCRIPTS!r});"
+            "import vtg.cli;"
+            "print(json.dumps(sorted(sys.modules)))"
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", snippet], capture_output=True, text=True, check=True
+        )
+        return set(json.loads(proc.stdout))
+
+    def test_remote_stack_and_pool_not_imported_eagerly(self):
+        loaded = self._modules_after_importing_cli()
+        for name in ("vtg.remote", "http.client", "ssl", "email.parser", "concurrent.futures"):
+            self.assertNotIn(name, loaded, f"{name} must not be imported by `import vtg.cli`")
 
 
 if __name__ == "__main__":

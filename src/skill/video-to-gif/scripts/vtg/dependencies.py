@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from typing import Any
 
 from . import errors
@@ -50,9 +51,30 @@ def _run(cmd: list[str], timeout: float = 15.0) -> subprocess.CompletedProcess[s
     )
 
 
+# Process-local memo for the capability probes below. `doctor` asks six boolean
+# questions that are answered by only two ffmpeg tables, and each spawn costs
+# ~20ms of ffmpeg's own dyld/registration startup rather than real work. The key
+# is the full argv, which carries the RESOLVED executable path, so a VTG_FFMPEG
+# override can never be served an answer produced by PATH's ffmpeg. The cache is
+# deliberately in-memory only and never persisted: doctor exists to report the
+# toolchain as it is right now, and a stale on-disk capability table would defeat
+# exactly the failure it is there to catch (section 6.3).
+_PROBE_CACHE: dict[tuple[str, ...], subprocess.CompletedProcess[str]] = {}
+
+
+def _run_cached(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    """``_run`` memoized for the lifetime of the process (read-only result)."""
+    key = tuple(cmd)
+    proc = _PROBE_CACHE.get(key)
+    if proc is None:
+        proc = _run(cmd)
+        _PROBE_CACHE[key] = proc
+    return proc
+
+
 def _has_filter(ffmpeg: str, filter_name: str) -> bool:
     try:
-        proc = _run([ffmpeg, "-hide_banner", "-filters"])
+        proc = _run_cached([ffmpeg, "-hide_banner", "-filters"])
     except (OSError, subprocess.SubprocessError):
         return False
     for line in proc.stdout.splitlines():
@@ -64,7 +86,7 @@ def _has_filter(ffmpeg: str, filter_name: str) -> bool:
 
 def _has_encoder(ffmpeg: str, encoder: str) -> bool:
     try:
-        proc = _run([ffmpeg, "-hide_banner", "-encoders"])
+        proc = _run_cached([ffmpeg, "-hide_banner", "-encoders"])
     except (OSError, subprocess.SubprocessError):
         return False
     for line in proc.stdout.splitlines():
@@ -93,6 +115,13 @@ def ytdlp_version(path: str) -> str | None:
         return None
     version = (proc.stdout or "").strip().splitlines()[0].strip() if proc.stdout else ""
     return version or None
+
+
+# Upper bound on how long run_doctor waits to collect the backgrounded yt-dlp
+# version probe. The real bound is the 10s subprocess timeout inside
+# ytdlp_version; this only exists so a worker wedged somewhere outside that
+# timeout degrades to version=None instead of hanging doctor forever.
+_YTDLP_JOIN_SECONDS = 12.0
 
 
 def _tempdir_writable() -> bool:
@@ -133,6 +162,24 @@ def run_doctor(output_directory: str | None = None) -> dict[str, Any]:
     ffprobe = find_executable("ffprobe")
     platform_key = sys.platform if sys.platform in INSTALL_GUIDANCE else "linux"
     install_hint = INSTALL_GUIDANCE[platform_key]
+
+    # The optional yt-dlp version probe costs ~150ms -- yt-dlp's shebang starts a
+    # whole fresh CPython and imports the yt_dlp package just to print one string
+    # -- and nothing below it feeds that probe. Start it now so it overlaps the
+    # ffmpeg capability probes instead of running after them. daemon=True so a
+    # wedged yt-dlp can never delay interpreter exit or Ctrl-C (section 16);
+    # doctor writes no temp artifacts, so there is nothing for it to leave behind.
+    ytdlp_path = find_ytdlp()
+    ytdlp_probe: dict[str, str | None] = {"version": None}
+    ytdlp_thread: threading.Thread | None = None
+    if ytdlp_path:
+        resolved_ytdlp = ytdlp_path
+
+        def _probe_ytdlp() -> None:
+            ytdlp_probe["version"] = ytdlp_version(resolved_ytdlp)
+
+        ytdlp_thread = threading.Thread(target=_probe_ytdlp, daemon=True)
+        ytdlp_thread.start()
 
     checks.append(
         {
@@ -221,8 +268,9 @@ def run_doctor(output_directory: str | None = None) -> dict[str, Any]:
     # Optional yt-dlp adapter (FR-022, spec section 6.3). Its absence MUST NOT be
     # a failure, so this check is always ok=True and never gates `healthy`; the
     # presence/version is reported for the agent's information.
-    ytdlp_path = find_ytdlp()
-    ytdlp_ver = ytdlp_version(ytdlp_path) if ytdlp_path else None
+    if ytdlp_thread is not None:
+        ytdlp_thread.join(timeout=_YTDLP_JOIN_SECONDS)
+    ytdlp_ver = ytdlp_probe["version"]
     checks.append(
         {
             "name": "ytdlp_adapter",

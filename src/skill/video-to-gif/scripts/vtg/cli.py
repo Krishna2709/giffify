@@ -18,7 +18,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from types import FrameType
-from typing import Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from . import (
     __version__,
@@ -30,14 +30,22 @@ from . import (
     models,
     naming,
     paths,
+    redaction,
     transforms,
 )
 from . import config as config_mod
-from . import remote as remote_mod
 from .inspect import inspect_source
 from .models import BUILTIN_PROFILES, ClipSpec, EffectiveSettings, SourceInfo
 from .progress import ProgressReporter
 from .timestamps import parse_timestamp
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    # vtg.remote drags in http.client/ssl/email (~12ms of import time) that a
+    # local-source command never touches, so it is imported lazily at its single
+    # runtime use site (_acquire_remote). Under `from __future__ import
+    # annotations` every annotation below is a string, so the name is only ever
+    # needed by a type checker.
+    from . import remote as remote_mod
 
 SCHEMA_VERSION = 1
 
@@ -422,6 +430,11 @@ def _acquire_remote(
     job: _JobCleanup,
 ) -> str:
     """Gate (FR-018) then acquire a remote URL; return the local download path."""
+    # Deferred so purely local commands never pay for http.client/ssl/email. The
+    # caller has already established this is a URL (paths.url_scheme), and the
+    # FR-018 enablement gate below still runs before any network access.
+    from . import remote as remote_mod
+
     remote_mod.ensure_remote_permitted(
         raw, cfg.remote_sources, bool(getattr(args, "allow_remote", False))
     )
@@ -775,6 +788,156 @@ def _display_path(path: str) -> str:
     return path
 
 
+# Ceiling on how many clips are encoded at once.
+#
+# SEC-011 scopes the temporary-disk ceiling PER JOB (spec line 1811, deliberately
+# contrasted with the per-CLIP wall-clock timeout above it). Concurrency does not
+# get to reinterpret that: every clip in a job shares one ffmpeg.TempBudget (see
+# _run_conversions), so the guard loops sum the whole job's live temp artifacts
+# against limits.maxTemporaryBytes exactly as the serial loop did. The bound
+# below is therefore about CPU, not disk.
+#
+# It stays small, and never exceeds half the CPUs, because the wall-clock limit
+# IS per clip: W concurrent encodes make each clip's own wall clock run slower,
+# so an unbounded W could push a clip past limits.maxClipProcessingSeconds purely
+# through self-inflicted contention. Leaving >= 2 cores per encode keeps the
+# measured inflation small (~1.4x for W=4 on a 12-core host) instead of linear
+# in W, and small hosts fall back to the serial loop.
+_MAX_CONVERSION_WORKERS = 4
+
+
+def _conversion_workers(clip_count: int) -> int:
+    """How many independent clips to encode concurrently."""
+    cpus = os.cpu_count() or 1
+    return max(1, min(_MAX_CONVERSION_WORKERS, clip_count, cpus // 2))
+
+
+def _convert_one(
+    planned_clip: PlannedClip,
+    source: SourceInfo,
+    cfg: config_mod.Config,
+    tools: dict[str, str],
+    reporter: ProgressReporter,
+    *,
+    total: int,
+    temp_budget: ffmpeg.TempBudget,
+) -> tuple[str, dict[str, Any]]:
+    """Encode one planned clip, returning ('created'|'failed', result entry).
+
+    Raises CancelledError only; every other EngineError is converted into a
+    ``failed`` entry so one clip's runtime failure cannot stop the others.
+    """
+    clip = planned_clip.clip
+    if _CANCEL_EVENT.is_set():
+        raise errors.CancelledError(clip_index=clip.index)
+
+    reporter.clip_started(clip.index, total, clip.name)
+    try:
+        conv = ffmpeg.convert_clip(
+            tools["ffmpeg"],
+            source,
+            start_ms=clip.start_ms,
+            duration_ms=clip.duration_ms,
+            settings=planned_clip.settings,
+            dest_path=planned_clip.dest_path,
+            output_dir=os.path.dirname(planned_clip.dest_path),
+            timeout_seconds=cfg.max_clip_processing_seconds,
+            max_temp_bytes=cfg.max_temporary_bytes,
+            keep_temporary_files=cfg.keep_temporary_files,
+            clip_index=clip.index,
+            cancel_event=_CANCEL_EVENT,
+            reporter=reporter,
+            temp_budget=temp_budget,
+        )
+    except errors.CancelledError:
+        raise
+    except errors.EngineError as exc:
+        reporter.clip_failed(clip.index, exc.code, exc.message)
+        return "failed", exc.to_dict()
+    reporter.clip_completed(clip.index, _display_path(conv.path))
+    return "created", _clip_result(planned_clip, conv)
+
+
+def _run_conversions_parallel(
+    planned: list[PlannedClip],
+    source: SourceInfo,
+    cfg: config_mod.Config,
+    tools: dict[str, str],
+    reporter: ProgressReporter,
+    *,
+    workers: int,
+    temp_budget: ffmpeg.TempBudget,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """continueOnError=true fast path: encode independent clips concurrently.
+
+    Clips share no state except the SEC-011 temp budget -- each has its own
+    palette temp dir, its own temp GIF and its own destination -- so the only
+    ordering that matters is the ordering of the RESULT, which is rebuilt from
+    index-addressed slots below and is therefore identical to the serial path
+    run-to-run. Threads (not processes) because all the work happens inside the
+    ffmpeg child with the GIL released, and because the shared ``temp_budget``
+    has to be one object for the whole job. Progress JSON Lines interleave,
+    which is fine: the stream is not the frozen document, and every event still
+    carries clipIndex.
+    """
+    # Deferred: only this path needs concurrent.futures (~6ms of import), and
+    # create/preview/inspect/doctor never reach it.
+    from concurrent.futures import ThreadPoolExecutor
+
+    created: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    total = len(planned)
+    outcomes: list[tuple[str, dict[str, Any]] | None] = [None] * total
+    cancelled: errors.CancelledError | None = None
+
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="vtg-clip") as pool:
+        futures: dict[Any, int] = {}
+        for i, planned_clip in enumerate(planned):
+            clip = planned_clip.clip
+            if planned_clip.action == "skip":
+                skipped.append({"clipIndex": clip.index, "reason": "output exists (skip policy)"})
+                reporter.clip_skipped(clip.index, "collision-skip")
+                continue
+            futures[
+                pool.submit(
+                    _convert_one,
+                    planned_clip,
+                    source,
+                    cfg,
+                    tools,
+                    reporter,
+                    total=total,
+                    temp_budget=temp_budget,
+                )
+            ] = i
+        # Drain EVERY future before leaving the pool, even once a cancellation has
+        # been seen: each worker's convert_clip terminates its own ffmpeg process
+        # group and removes its own temp/palette files, and CancelledError must not
+        # escape (taking the interpreter with it) while any of that is still in
+        # flight (section 16). Workers queued behind a cancel observe _CANCEL_EVENT
+        # and return immediately, so this costs nothing.
+        for future, i in futures.items():
+            try:
+                outcomes[i] = future.result()
+            except errors.CancelledError as exc:
+                if cancelled is None:
+                    cancelled = exc
+
+    if cancelled is not None:
+        raise cancelled
+
+    # Rebuild created/failed in clip order from the indexed slots, never in
+    # completion order, so the structured result is deterministic (section 13).
+    for outcome in outcomes:
+        if outcome is None:
+            continue
+        kind, entry = outcome
+        (created if kind == "created" else failed).append(entry)
+
+    return created, failed, skipped
+
+
 def _run_conversions(
     planned: list[PlannedClip],
     source: SourceInfo,
@@ -784,6 +947,28 @@ def _run_conversions(
     *,
     continue_on_error: bool,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    # One SEC-011 temp-disk budget for the whole job, shared by every clip
+    # whether they run concurrently or serially, so limits.maxTemporaryBytes is
+    # measured over the job's live temporary artifacts rather than per clip.
+    temp_budget = ffmpeg.TempBudget()
+
+    if continue_on_error:
+        # Stop-on-error is inherently order dependent (a failure decides what the
+        # REMAINING clips report), so only the continueOnError default is
+        # parallelized; the serial loop below stays the authority for the other.
+        encodable = sum(1 for p in planned if p.action != "skip")
+        workers = _conversion_workers(encodable)
+        if workers > 1:
+            return _run_conversions_parallel(
+                planned,
+                source,
+                cfg,
+                tools,
+                reporter,
+                workers=workers,
+                temp_budget=temp_budget,
+            )
+
     created: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -814,6 +999,7 @@ def _run_conversions(
                 clip_index=clip.index,
                 cancel_event=_CANCEL_EVENT,
                 reporter=reporter,
+                temp_budget=temp_budget,
             )
         except errors.CancelledError:
             raise
@@ -1757,7 +1943,7 @@ def main(argv: list[str] | None = None) -> int:
         # before surfacing it. A no-op for the common non-URL messages.
         engine_exc = errors.EngineError(
             errors.INTERNAL_ERROR,
-            remote_mod.redact_message_urls(f"Internal engine error: {exc}"),
+            redaction.redact_message_urls(f"Internal engine error: {exc}"),
             exit_code=errors.EXIT_INTERNAL,
             status=errors.STATUS_FAILED,
         )

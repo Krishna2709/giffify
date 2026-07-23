@@ -28,12 +28,17 @@ class TestCancellation(EngineTestCase):
         media.generate_landscape(cls.src, size="1920x1080", fps=30, duration=8.0)
 
     def _manifest(self):
+        # c0 is deliberately tiny and c1..c3 are long: a batch may encode
+        # independent clips concurrently, so "clip 0 completed" must not be taken
+        # to mean "clip 1 has not started yet". The short first clip guarantees a
+        # completed GIF exists while the rest are still mid-encode, whatever the
+        # worker count (including 1), which is the window this test needs.
         data = {
             "schemaVersion": 1,
             "input": self.src,
             "profile": "high",
             "clips": [
-                {"name": "c0", "start": "0", "end": "3"},
+                {"name": "c0", "start": "0", "end": "0.2"},
                 {"name": "c1", "start": "0", "end": "3"},
                 {"name": "c2", "start": "0", "end": "3"},
                 {"name": "c3", "start": "0", "end": "3"},

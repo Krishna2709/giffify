@@ -6,7 +6,6 @@ hooks. Malformed manifests always produce structured validation errors.
 
 from __future__ import annotations
 
-import csv
 import io
 import json
 import os
@@ -424,6 +423,12 @@ def parse_json_manifest(raw: str, *, source_path: str | None = None) -> Manifest
 
 
 def parse_csv_manifest(raw: str) -> Manifest:
+    # Deferred: only the CSV manifest form needs `csv` (~1.6ms of import), and
+    # every other command -- including a JSON manifest -- pays for it otherwise.
+    # It is the first statement in the function, so it still executes before any
+    # parsing work and the error codes/ordering below are unchanged.
+    import csv
+
     warnings: list[str] = []
     reader = csv.reader(io.StringIO(raw))
     rows = list(reader)

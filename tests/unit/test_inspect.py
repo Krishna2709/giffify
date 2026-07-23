@@ -239,5 +239,28 @@ class TestProbeFailure(unittest.TestCase):
         self.assertEqual(cmd[idx + 1], "file,pipe")
 
 
+class TestFrameRateParsing(unittest.TestCase):
+    """_parse_fps replaced fractions.Fraction with a hand-rolled 'N/D' split; the
+    degenerate rates ffprobe really emits must still yield 0.0, not an exception."""
+
+    def _fps(self, value):
+        return vinspect._parse_fps({"avg_frame_rate": value, "r_frame_rate": value})
+
+    def test_rational(self):
+        self.assertEqual(self._fps("30/1"), 30.0)
+        self.assertAlmostEqual(self._fps("30000/1001"), 29.97002997)
+
+    def test_bare_number(self):
+        self.assertEqual(self._fps("25"), 25.0)
+
+    def test_degenerate_rates_yield_zero(self):
+        for value in ("0/0", "N/A", "30/0", "0/1", "", "garbage", "abc/def"):
+            self.assertEqual(self._fps(value), 0.0, value)
+
+    def test_falls_back_to_r_frame_rate(self):
+        fps = vinspect._parse_fps({"avg_frame_rate": "0/0", "r_frame_rate": "24/1"})
+        self.assertEqual(fps, 24.0)
+
+
 if __name__ == "__main__":
     unittest.main()
